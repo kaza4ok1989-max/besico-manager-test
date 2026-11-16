@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, CSSProperties } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from './supabase';
@@ -125,6 +125,7 @@ export default function App() {
   const [availabilityError, setAvailabilityError] = useState('');
   const [availabilityFrom, setAvailabilityFrom] = useState(berlinToday);
   const [availabilityTo, setAvailabilityTo] = useState(berlinToday);
+  const parkingFrameRef = useRef<HTMLIFrameElement>(null);
   const [expandedFrame, setExpandedFrame] = useState<'Parkplatz' | 'Vorführwagenplan' | null>(null);
   const isAdmin = session?.user.id === ADMIN_UID;
 
@@ -202,6 +203,22 @@ export default function App() {
       setParkingLoading(false);
     }
   }
+
+  // Same-origin iframe handshake: token stays in memory, never in URL or storage.
+  useEffect(() => {
+    const sendSession = () => {
+      const frame = parkingFrameRef.current?.contentWindow;
+      if (!frame) return;
+      frame.postMessage({ type: 'BESICO_MANAGER_SESSION', token: session?.access_token ?? null }, window.location.origin);
+    };
+    const receiveReady = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.source !== parkingFrameRef.current?.contentWindow) return;
+      if (event.data?.type === 'BESICO_PARKING_READY') sendSession();
+    };
+    window.addEventListener('message', receiveReady);
+    sendSession();
+    return () => window.removeEventListener('message', receiveReady);
+  }, [session?.access_token, page]);
 
   async function checkParkingAdminAccess() {
     setParkingAuthLoading(true);
@@ -442,7 +459,7 @@ export default function App() {
         {page === 'Lagerplan' && <LagerUebersicht view="Lagerplan" />}
         {page === 'Parkplatz' && <section style={frameSectionStyle('Parkplatz')}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-            <div><h1 style={{ margin: '0 0 6px' }}>Parkplatz</h1><p style={{ margin: 0, color: '#64748b' }}>Originale Fahrzeugkarte mit unveränderten Positionen und Bildern. Die Parkplatz-Anmeldung erfolgt separat.</p></div>
+            <div><h1 style={{ margin: '0 0 6px' }}>Parkplatz</h1><p style={{ margin: 0, color: '#64748b' }}>Originale Fahrzeugkarte mit unveränderten Positionen und Bildern. Die Anmeldung erfolgt automatisch über BESICO Manager.</p></div>
             <button type="button" onClick={() => setExpandedFrame(expandedFrame === 'Parkplatz' ? null : 'Parkplatz')} style={{ ...button, marginLeft: 'auto' }}>{expandedFrame === 'Parkplatz' ? 'Vollbild schließen' : 'Vollbild'}</button>
             <a href={`${import.meta.env.BASE_URL}parking/index.html`} target="_blank" rel="noopener noreferrer" style={{ ...button, textDecoration: 'none', display: 'inline-flex', gap: 8, alignItems: 'center' }}><ExternalLink size={16} /> In neuem Fenster öffnen</a>
           </div>
@@ -453,7 +470,7 @@ export default function App() {
             <span style={{ color: '#64748b', fontSize: 13 }}>Nur Verbindungstest – keine Fahrzeugdaten werden geändert.</span>
             {parkingAuthResult && <p role="status" style={{ flexBasis: '100%', margin: 0, color: parkingAuthResult.ok ? '#166534' : '#b91c1c', fontSize: 13 }}>{parkingAuthResult.message}</p>}
           </div>
-          <iframe title="BESICO Parkplatz" src={`${import.meta.env.BASE_URL}parking/index.html`} style={frameStyle('Parkplatz')} />
+          <iframe ref={parkingFrameRef} title="BESICO Parkplatz" src={`${import.meta.env.BASE_URL}parking/index.html`} style={frameStyle('Parkplatz')} />
         </section>}
 
         {page === 'Vorführwagenplan' && <section style={frameSectionStyle('Vorführwagenplan')}>
