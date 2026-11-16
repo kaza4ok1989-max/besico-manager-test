@@ -10,6 +10,20 @@ import Inventur from './Inventur';
 import { Search, Warehouse, FileText, History, FileSpreadsheet, LayoutDashboard, LogOut, RefreshCw, Plus, ClipboardCheck, CarFront, CalendarDays, ExternalLink } from 'lucide-react';
 
 const ADMIN_UID = '103ca84c-cb46-440f-a1df-b95c8b1b8e52';
+
+// Parkplatz uses its own Supabase project. Only its public (publishable) key is used here.
+const PARKING_URL = 'https://cydestwofhdfsmekwxho.supabase.co';
+const PARKING_PUBLIC_KEY = 'sb_publishable_LNyn0n-rbQfu5AIMeAt9XQ_zqSpQ3Dh';
+type ParkingCar = { id: number; branch_id: number | null; yard_status: string | null };
+type ParkingBranch = { id: number; name: string };
+async function parkingGet<T>(path: string): Promise<T> {
+  const response = await fetch(`${PARKING_URL}/rest/v1/${path}`, {
+    headers: { apikey: PARKING_PUBLIC_KEY, Authorization: `Bearer ${PARKING_PUBLIC_KEY}` },
+  });
+  if (!response.ok) throw new Error(`Parkplatz-Daten nicht verfügbar (HTTP ${response.status})`);
+  return response.json() as Promise<T>;
+}
+
 type RecordData = Record<string, unknown>;
 type Radsatz = { id: string; kennzeichen: string | null; belegnummer: string | null; lager: string | null; lagerplatz: string | null; daten: RecordData | null; erstellt_am: string | null };
 const menu = [
@@ -48,6 +62,10 @@ export default function App() {
   const [radsatzList, setRadsatzList] = useState<Radsatz[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [dataError, setDataError] = useState('');
+  const [parkingCars, setParkingCars] = useState<ParkingCar[]>([]);
+  const [parkingBranches, setParkingBranches] = useState<ParkingBranch[]>([]);
+  const [parkingLoading, setParkingLoading] = useState(false);
+  const [parkingError, setParkingError] = useState('');
   const isAdmin = session?.user.id === ADMIN_UID;
 
   useEffect(() => {
@@ -63,8 +81,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!isAdmin) { setRadsatzList([]); return; }
+    if (!isAdmin) { setRadsatzList([]); setParkingCars([]); setParkingBranches([]); return; }
     void loadRadsaetze();
+    void loadParking();
   }, [isAdmin]);
 
   async function loadRadsaetze() {
@@ -86,6 +105,28 @@ export default function App() {
     finally { setDataLoading(false); }
   }
 
+  async function loadParking() {
+    setParkingLoading(true);
+    setParkingError('');
+    try {
+      const branches = await parkingGet<ParkingBranch[]>('branches?select=id,name&order=id.asc');
+      const allCars: ParkingCar[] = [];
+      for (let start = 0; ; start += 1000) {
+        const batch = await parkingGet<ParkingCar[]>(`cars?select=id,branch_id,yard_status&order=id.asc&offset=${start}&limit=1000`);
+        allCars.push(...batch);
+        if (batch.length < 1000) break;
+      }
+      setParkingBranches(branches);
+      setParkingCars(allCars);
+    } catch (error) {
+      setParkingCars([]);
+      setParkingBranches([]);
+      setParkingError(error instanceof Error ? error.message : 'Parkplatz-Daten konnten nicht geladen werden.');
+    } finally {
+      setParkingLoading(false);
+    }
+  }
+
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setSigningIn(true); setLoginError('');
     const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
@@ -98,7 +139,7 @@ export default function App() {
   function navigate(target: string) {
     window.history.pushState({}, '', pageHref(target));
     setPage(target); setSearch('');
-    if (target === 'Dashboard') void loadRadsaetze();
+    if (target === 'Dashboard') { void loadRadsaetze(); void loadParking(); }
   }
   function openSchein(id: string) {
     const url = `${window.location.origin}${import.meta.env.BASE_URL}?qr=${encodeURIComponent(id)}`;
@@ -120,6 +161,13 @@ export default function App() {
   const assigned = radsatzList.filter(r => (r.lager === 'Zelt' || r.lager === 'Lager') && !!text(r.lagerplatz));
   const zelt = assigned.filter(r => r.lager === 'Zelt').length;
   const lager = assigned.filter(r => r.lager === 'Lager').length;
+  const activeParkingCars = parkingCars.filter(car => (car.yard_status || 'on_site') === 'on_site');
+  const parkingByBranch = parkingBranches.map(branch => ({
+    ...branch,
+    count: activeParkingCars.filter(car => Number(car.branch_id ?? 1) === Number(branch.id)).length,
+  })).filter(branch => branch.count > 0);
+  const parkingUnknown = activeParkingCars.filter(car =>
+    !parkingBranches.some(branch => Number(branch.id) === Number(car.branch_id ?? 1))).length;
   const stats = [
     ['Radsätze gesamt', radsatzList.length],
     ['Im Lager', assigned.length],
@@ -156,7 +204,7 @@ export default function App() {
           <div className="search-box"><Search size={24} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Kennzeichen, FIN, Fahrzeug, Reifen oder Lagerplatz suchen..." /></div>
           <div className="quick-actions">
             <div className="action-card" onClick={() => navigate('Einlagerungsscheine')} style={{ cursor: 'pointer' }}><Plus size={28} /><strong>Neuer Radsatz</strong></div>
-            <div className="action-card" onClick={() => void loadRadsaetze()} style={{ cursor: 'pointer' }}><RefreshCw size={28} /><strong>Aktualisieren</strong></div>
+            <div className="action-card" onClick={() => { void loadRadsaetze(); void loadParking(); }} style={{ cursor: 'pointer' }}><RefreshCw size={28} /><strong>Aktualisieren</strong></div>
           </div>
           <h2>Bereiche</h2>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 235px), 1fr))', gap: 14, marginBottom: 26 }}>
@@ -168,7 +216,7 @@ export default function App() {
             </button>
             <button type="button" onClick={() => navigate('Parkplatz')} style={{ ...card, textAlign: 'left', cursor: 'pointer', color: '#12365a', display: 'grid', gap: 10 }}>
               <CarFront size={26} /><strong style={{ fontSize: 17 }}>Parkplatz</strong>
-              <span style={{ fontSize: 15 }}>Fahrzeugkarte</span>
+              <span style={{ fontSize: 15 }}>{parkingLoading ? 'Fahrzeuge werden geladen…' : parkingError ? 'Fahrzeugkarte' : `${activeParkingCars.length} Fahrzeuge`}</span>
               <span style={{ color: '#64748b', fontSize: 13 }}>Fahrzeuge, Positionen und Status in der bestehenden Parkplatz-Anwendung</span>
               <span style={{ fontSize: 13, fontWeight: 700 }}>Parkplatz öffnen →</span>
             </button>
@@ -188,6 +236,17 @@ export default function App() {
           <h2>Reifenlager · Übersicht</h2>
           <div className="stats">{stats.map(([name, count]) => <div className="stat-card" key={name}><span>{name}</span><strong>{dataLoading ? '...' : count}</strong></div>)}</div>
           {dataError && <p role="alert" style={{ color: '#b91c1c' }}>{dataError}</p>}
+           <h2>Parkplatz · Übersicht</h2>
+           {parkingLoading && <p>Parkplatz-Daten werden geladen...</p>}
+           {parkingError && <p role="alert" style={{ color: '#b91c1c' }}>{parkingError}. Bitte den öffentlichen Lesezugriff (RLS) für die Parkplatz-Tabellen prüfen.</p>}
+           {!parkingLoading && !parkingError && <div className="stats">
+             <div className="stat-card"><span>Fahrzeuge gesamt</span><strong>{activeParkingCars.length}</strong></div>
+             {parkingByBranch.map(branch => <div className="stat-card" key={branch.id}>
+               <span>{Number(branch.id) === 1 ? 'Glauchau' : branch.name}</span><strong>{branch.count}</strong>
+             </div>)}
+             {parkingUnknown > 0 && <div className="stat-card"><span>Standort nicht zugeordnet</span><strong>{parkingUnknown}</strong></div>}
+           </div>}
+
           {!!query && <section style={{ marginTop: 24 }}><h2>Suchergebnisse Radsätze ({filtered.length})</h2>
             {dataLoading && <p>Radsätze werden geladen...</p>}
             {!dataLoading && filtered.length === 0 && <p>Keine Radsätze gefunden.</p>}
