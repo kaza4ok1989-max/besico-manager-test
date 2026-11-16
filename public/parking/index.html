@@ -506,6 +506,25 @@
       .marker { width: 32px; height: 32px; }
       .carShape { scale: .9; }
     }
+
+    /* Mobile: keep the parking map at a readable scale, scroll inside the map. */
+    @media (max-width: 700px) {
+      #mapWrapper {
+        width: 100%;
+        max-height: 66dvh;
+        overflow: auto;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+        touch-action: pan-x pan-y;
+      }
+      #mapStage { position: relative; width: 1050px; max-width: none; }
+      #parkingImage { width: 100%; height: auto; }
+      #markers { position: absolute; inset: 0; }
+      .marker { width: 36px; height: 36px; touch-action: manipulation; }
+      .carShape { scale: 1; }
+      .marker .carVin { font-size: 8px; line-height: 10px; }
+      .batteryDot { width: 13px; height: 13px; font-size: 9px; line-height: 11px; }
+    }
   </style>
 </head>
 
@@ -591,12 +610,14 @@
   </div>
 
   <div id="mapWrapper">
+    <div id="mapStage">
     <img
       id="parkingImage"
       src="./parking.png?v=3"
       alt="Parkplatz"
     >
     <div id="markers"></div>
+    </div>
   </div>
   <div id="chemnitzPhotoWrap" style="display:none;margin-bottom:12px"><img src="./chemnitz_karte.png" alt="FordStore Chemnitz" style="display:block;width:100%;height:auto;border-radius:10px;border:1px solid #cbd5e1"></div>
   <div id="branchList"></div>
@@ -2061,6 +2082,8 @@
 
   /* ПЕРЕТАСКИВАНИЕ — ТОЛЬКО АДМИНИСТРАТОР */
   function enableDrag(marker, car) {
+    // On phones, a finger should scroll the map, never move a vehicle in Supabase.
+    if (window.matchMedia('(pointer: coarse)').matches) return;
     let startX = 0, startY = 0, moved = false, mode = "move";
     let startingAngle = 0, pointerStartAngle = 0, currentAngle = 0;
     const normalizeAngle = angle => ((Math.round(angle) % 360) + 360) % 360;
