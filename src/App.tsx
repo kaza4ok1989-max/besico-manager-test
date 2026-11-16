@@ -463,13 +463,7 @@ export default function App() {
             <button type="button" onClick={() => setExpandedFrame(expandedFrame === 'Parkplatz' ? null : 'Parkplatz')} style={{ ...button, marginLeft: 'auto' }}>{expandedFrame === 'Parkplatz' ? 'Vollbild schließen' : 'Vollbild'}</button>
             <a href={`${import.meta.env.BASE_URL}parking/index.html`} target="_blank" rel="noopener noreferrer" style={{ ...button, textDecoration: 'none', display: 'inline-flex', gap: 8, alignItems: 'center' }}><ExternalLink size={16} /> In neuem Fenster öffnen</a>
           </div>
-          <div style={{ ...card, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <button type="button" onClick={() => void checkParkingAdminAccess()} disabled={parkingAuthLoading} style={{ ...button, opacity: parkingAuthLoading ? 0.6 : 1 }}>
-              {parkingAuthLoading ? 'Zugang wird geprüft…' : 'Administratorzugang prüfen'}
-            </button>
-            <span style={{ color: '#64748b', fontSize: 13 }}>Nur Verbindungstest – keine Fahrzeugdaten werden geändert.</span>
-            {parkingAuthResult && <p role="status" style={{ flexBasis: '100%', margin: 0, color: parkingAuthResult.ok ? '#166534' : '#b91c1c', fontSize: 13 }}>{parkingAuthResult.message}</p>}
-          </div>
+        
           <iframe ref={parkingFrameRef} title="BESICO Parkplatz" src={`${import.meta.env.BASE_URL}parking/index.html`} style={frameStyle('Parkplatz')} />
         </section>}
 
