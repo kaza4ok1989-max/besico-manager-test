@@ -122,7 +122,22 @@ export default function App() {
   const [availabilityError, setAvailabilityError] = useState('');
   const [availabilityFrom, setAvailabilityFrom] = useState(berlinToday);
   const [availabilityTo, setAvailabilityTo] = useState(berlinToday);
+  const [expandedFrame, setExpandedFrame] = useState<'Parkplatz' | 'Vorführwagenplan' | null>(null);
   const isAdmin = session?.user.id === ADMIN_UID;
+
+  useEffect(() => {
+    if (!expandedFrame) return;
+    const onEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setExpandedFrame(null); };
+    window.addEventListener('keydown', onEscape);
+    return () => window.removeEventListener('keydown', onEscape);
+  }, [expandedFrame]);
+
+  const frameSectionStyle = (name: 'Parkplatz' | 'Vorführwagenplan'): CSSProperties => expandedFrame === name
+    ? { position: 'fixed', inset: 0, zIndex: 9999, background: '#f8fafc', padding: 16, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', overflow: 'hidden' }
+    : { width: '100%' };
+  const frameStyle = (name: 'Parkplatz' | 'Vorführwagenplan'): CSSProperties => expandedFrame === name
+    ? { display: 'block', width: '100%', flex: 1, minHeight: 0, border: '1px solid #cbd5e1', borderRadius: 12, background: '#fff' }
+    : { display: 'block', width: '100%', height: 'min(82vh, 1100px)', minHeight: 560, resize: 'both', overflow: 'auto', boxSizing: 'border-box', border: '1px solid #cbd5e1', borderRadius: 12, background: '#fff' };
 
   useEffect(() => {
     void supabase.auth.getSession().then(({ data }) => { setSession(data.session); setLoading(false); });
@@ -388,26 +403,28 @@ export default function App() {
           </section>}
         </>}
         {page === 'Lagerplan' && <LagerUebersicht view="Lagerplan" />}
-        {page === 'Parkplatz' && <section style={{ width: '100%' }}>
+        {page === 'Parkplatz' && <section style={frameSectionStyle('Parkplatz')}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
             <div><h1 style={{ margin: '0 0 6px' }}>Parkplatz</h1><p style={{ margin: 0, color: '#64748b' }}>Originale Fahrzeugkarte mit unveränderten Positionen und Bildern. Die Parkplatz-Anmeldung erfolgt separat.</p></div>
+            <button type="button" onClick={() => setExpandedFrame(expandedFrame === 'Parkplatz' ? null : 'Parkplatz')} style={{ ...button, marginLeft: 'auto' }}>{expandedFrame === 'Parkplatz' ? 'Vollbild schließen' : 'Vollbild'}</button>
             <a href={`${import.meta.env.BASE_URL}parking/index.html`} target="_blank" rel="noopener noreferrer" style={{ ...button, textDecoration: 'none', display: 'inline-flex', gap: 8, alignItems: 'center' }}><ExternalLink size={16} /> In neuem Fenster öffnen</a>
           </div>
-          <iframe title="BESICO Parkplatz" src={`${import.meta.env.BASE_URL}parking/index.html`} style={{ display: 'block', width: '100%', height: 'min(82vh, 1100px)', minHeight: 560, border: '1px solid #cbd5e1', borderRadius: 12, background: '#fff' }} />
+          <iframe title="BESICO Parkplatz" src={`${import.meta.env.BASE_URL}parking/index.html`} style={frameStyle('Parkplatz')} />
         </section>}
 
-        {page === 'Vorführwagenplan' && <section style={{ width: '100%' }}>
+        {page === 'Vorführwagenplan' && <section style={frameSectionStyle('Vorführwagenplan')}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
             <div>
               <h1 style={{ margin: '0 0 6px' }}>Vorführwagenplan</h1>
               <p style={{ margin: 0, color: '#64748b' }}>Bestehender Vorführwagenplan mit unveränderten Fahrzeugen und Buchungen. Die Anmeldung erfolgt gegebenenfalls separat.</p>
             </div>
+            <button type="button" onClick={() => setExpandedFrame(expandedFrame === 'Vorführwagenplan' ? null : 'Vorführwagenplan')} style={{ ...button, marginLeft: 'auto' }}>{expandedFrame === 'Vorführwagenplan' ? 'Vollbild schließen' : 'Vollbild'}</button>
             <a href="https://vfw-planer.jolly-fairy-7194.chatgpt.site/" target="_blank" rel="noopener noreferrer" style={{ ...button, textDecoration: 'none', display: 'inline-flex', gap: 8, alignItems: 'center' }}>
               <ExternalLink size={16} /> In neuem Fenster öffnen
             </a>
           </div>
           <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 12px' }}>Falls der Planer hier nicht angezeigt wird, bitte „In neuem Fenster öffnen“ verwenden. Manche Websites erlauben keine Einbettung.</p>
-          <iframe title="BESICO Vorführwagenplan" src="https://vfw-planer.jolly-fairy-7194.chatgpt.site/" referrerPolicy="strict-origin-when-cross-origin" style={{ display: 'block', width: '100%', height: 'min(82vh, 1100px)', minHeight: 560, border: '1px solid #cbd5e1', borderRadius: 12, background: '#fff' }} />
+          <iframe title="BESICO Vorführwagenplan" src="https://vfw-planer.jolly-fairy-7194.chatgpt.site/" referrerPolicy="strict-origin-when-cross-origin" style={frameStyle('Vorführwagenplan')} />
         </section>}
 
         {page === 'Inventur' && <Inventur />}
