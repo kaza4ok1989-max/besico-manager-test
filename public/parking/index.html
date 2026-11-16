@@ -903,6 +903,8 @@
   let selectedBatteryCarId = null;
   let editingBatteryId = null;
   let session = null;
+  let managerToken = null;
+  let managerAuthorized = false;
   let selectedCar = null;
   let pendingCar = null;
   let placementMode = false;
@@ -922,6 +924,7 @@
   const loginPanel = $("loginPanel");
 
   function isAdmin() {
+    if (managerAuthorized && managerToken) return true;
     return Boolean(
       session?.access_token &&
       session?.user?.id === ADMIN_UID
@@ -949,13 +952,13 @@
       admin ? "inline-block" : "none";
 
     $("authButton").style.display =
-      admin ? "none" : "inline-block";
+      admin || window.parent !== window ? "none" : "inline-block";
 
     $("logoutButton").style.display =
-      admin ? "inline-block" : "none";
+      admin && !managerAuthorized ? "inline-block" : "none";
 
     $("authInfo").textContent =
-      admin ? (session.user?.email || "Admin") : "";
+      admin ? (managerAuthorized ? "BESICO Manager · Angemeldet" : (session.user?.email || "Admin")) : (window.parent !== window ? "BESICO Manager · Verbindung wird geprüft" : "");
 
     if (!admin) {
       placementMode = false;
@@ -1182,8 +1185,49 @@
     await loadCars(true);
   });
 
+  /* BESICO Manager: sichere Sitzung vom übergeordneten Fenster. */
+  const PARKING_PROXY = "https://cydestwofhdfsmekwxho.supabase.co/functions/v1/besico-parking-api";
+  const MANAGER_ORIGIN = window.location.origin;
+  window.addEventListener("message", async event => {
+    if (event.origin !== MANAGER_ORIGIN || event.source !== window.parent) return;
+    if (event.data?.type !== "BESICO_MANAGER_SESSION") return;
+    const nextToken = typeof event.data.token === "string" ? event.data.token : null;
+    managerToken = nextToken;
+    managerAuthorized = false;
+    if (nextToken) {
+      try {
+        const result = await fetch(PARKING_PROXY, {
+          method: "POST",
+          headers: { Authorization: "Bearer " + nextToken, "Content-Type": "application/json" },
+          body: "{}"
+        });
+        const payload = await result.json();
+        managerAuthorized = result.ok && payload.authorized === true && managerToken === nextToken;
+      } catch (error) { console.error("Manager-Authentifizierung:", error); }
+    }
+    updateAdminUI();
+    await loadBranches();
+    await loadCars(true);
+    if (isAdmin()) { await loadBatteryChecks(); await loadExternalReminders(); }
+  });
+  if (window.parent !== window) window.parent.postMessage({ type: "BESICO_PARKING_READY" }, MANAGER_ORIGIN);
+
   /* ЗАПРОСЫ К БАЗЕ */
   async function apiRequest(path, options = {}, retry = true) {
+    if (managerAuthorized && managerToken) {
+      const response = await fetch(PARKING_PROXY + "?path=" + encodeURIComponent(path), {
+        method: options.method || "GET",
+        headers: {
+          Authorization: "Bearer " + managerToken,
+          "Content-Type": "application/json",
+          ...(options.headers || {})
+        },
+        body: options.body
+      });
+      if (!response.ok) throw new Error(await response.text());
+      return response;
+    }
+
     const response = await fetch(
       SUPABASE_URL + "/rest/v1/" + path,
       {
@@ -2544,7 +2588,7 @@
 
   /* ЗАПУСК САЙТА */
   async function start() {
-    await restoreSession();
+    if (window.parent === window) await restoreSession();
     await loadBranches();
     await loadCars(true);
     await loadBatteryChecks();
