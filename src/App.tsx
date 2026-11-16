@@ -156,7 +156,6 @@ export default function App() {
           <div className="search-box"><Search size={24} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Kennzeichen, FIN, Fahrzeug, Reifen oder Lagerplatz suchen..." /></div>
           <div className="quick-actions">
             <div className="action-card" onClick={() => navigate('Einlagerungsscheine')} style={{ cursor: 'pointer' }}><Plus size={28} /><strong>Neuer Radsatz</strong></div>
-            <div className="action-card" onClick={() => navigate('Lagerplan')} style={{ cursor: 'pointer' }}><Warehouse size={28} /><strong>Lagerplan</strong></div>
             <div className="action-card" onClick={() => void loadRadsaetze()} style={{ cursor: 'pointer' }}><RefreshCw size={28} /><strong>Aktualisieren</strong></div>
           </div>
           <h2>Bereiche</h2>
