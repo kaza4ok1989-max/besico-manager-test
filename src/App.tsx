@@ -7,7 +7,7 @@ import LagerUebersicht from './LagerUebersicht';
 import ExcelImportExport from './ExcelImportExport';
 import Historie from './Historie';
 import Inventur from './Inventur';
-import { Search, Warehouse, FileText, History, FileSpreadsheet, LayoutDashboard, LogOut, RefreshCw, Plus, ClipboardCheck, CarFront, ExternalLink } from 'lucide-react';
+import { Search, Warehouse, FileText, History, FileSpreadsheet, LayoutDashboard, LogOut, RefreshCw, Plus, ClipboardCheck, CarFront, CalendarDays, ExternalLink } from 'lucide-react';
 
 const ADMIN_UID = '103ca84c-cb46-440f-a1df-b95c8b1b8e52';
 type RecordData = Record<string, unknown>;
@@ -16,6 +16,7 @@ const menu = [
   { title: 'Dashboard', icon: LayoutDashboard },
   { title: 'Lagerplan', icon: Warehouse },
   { title: 'Parkplatz', icon: CarFront },
+  { title: 'Vorführwagenplan', icon: CalendarDays },
   { title: 'Inventur', icon: ClipboardCheck },
   { title: 'Einlagerungsscheine', icon: FileText },
   { title: 'Historie', icon: History },
@@ -186,6 +187,20 @@ export default function App() {
             <a href={`${import.meta.env.BASE_URL}parking/index.html`} target="_blank" rel="noopener noreferrer" style={{ ...button, textDecoration: 'none', display: 'inline-flex', gap: 8, alignItems: 'center' }}><ExternalLink size={16} /> In neuem Fenster öffnen</a>
           </div>
           <iframe title="BESICO Parkplatz" src={`${import.meta.env.BASE_URL}parking/index.html`} style={{ display: 'block', width: '100%', height: 'min(82vh, 1100px)', minHeight: 560, border: '1px solid #cbd5e1', borderRadius: 12, background: '#fff' }} />
+        </section>}
+
+        {page === 'Vorführwagenplan' && <section style={{ width: '100%' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+            <div>
+              <h1 style={{ margin: '0 0 6px' }}>Vorführwagenplan</h1>
+              <p style={{ margin: 0, color: '#64748b' }}>Bestehender Vorführwagenplan mit unveränderten Fahrzeugen und Buchungen. Die Anmeldung erfolgt gegebenenfalls separat.</p>
+            </div>
+            <a href="https://vfw-planer.jolly-fairy-7194.chatgpt.site/" target="_blank" rel="noopener noreferrer" style={{ ...button, textDecoration: 'none', display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+              <ExternalLink size={16} /> In neuem Fenster öffnen
+            </a>
+          </div>
+          <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 12px' }}>Falls der Planer hier nicht angezeigt wird, bitte „In neuem Fenster öffnen“ verwenden. Manche Websites erlauben keine Einbettung.</p>
+          <iframe title="BESICO Vorführwagenplan" src="https://vfw-planer.jolly-fairy-7194.chatgpt.site/" referrerPolicy="strict-origin-when-cross-origin" style={{ display: 'block', width: '100%', height: 'min(82vh, 1100px)', minHeight: 560, border: '1px solid #cbd5e1', borderRadius: 12, background: '#fff' }} />
         </section>}
 
         {page === 'Inventur' && <Inventur />}
