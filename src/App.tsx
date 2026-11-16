@@ -13,6 +13,7 @@ const ADMIN_UID = '103ca84c-cb46-440f-a1df-b95c8b1b8e52';
 
 // Parkplatz uses its own Supabase project. Only its public (publishable) key is used here.
 const PARKING_URL = 'https://cydestwofhdfsmekwxho.supabase.co';
+const PARKING_AUTH_CHECK_URL = `${PARKING_URL}/functions/v1/besico-parking-api`;
 const PARKING_PUBLIC_KEY = 'sb_publishable_LNyn0n-rbQfu5AIMeAt9XQ_zqSpQ3Dh';
 type ParkingCar = { id: number; branch_id: number | null; yard_status: string | null };
 type ParkingBranch = { id: number; name: string };
@@ -114,6 +115,8 @@ export default function App() {
   const [parkingBranches, setParkingBranches] = useState<ParkingBranch[]>([]);
   const [parkingLoading, setParkingLoading] = useState(false);
   const [parkingError, setParkingError] = useState('');
+  const [parkingAuthLoading, setParkingAuthLoading] = useState(false);
+  const [parkingAuthResult, setParkingAuthResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [vfwData, setVfwData] = useState<VfwDashboard | null>(null);
   const [vfwLoading, setVfwLoading] = useState(false);
   const [vfwError, setVfwError] = useState('');
@@ -197,6 +200,40 @@ export default function App() {
       setParkingError(error instanceof Error ? error.message : 'Parkplatz-Daten konnten nicht geladen werden.');
     } finally {
       setParkingLoading(false);
+    }
+  }
+
+  async function checkParkingAdminAccess() {
+    setParkingAuthLoading(true);
+    setParkingAuthResult(null);
+    try {
+      // The Manager session may belong to a different Supabase Auth project.
+      // Never store, display or log the access token.
+      const { data, error } = await supabase.auth.getSession();
+      if (error || !data.session?.access_token) {
+        setParkingAuthResult({ ok: false, message: 'Keine gültige BESICO-Manager-Sitzung gefunden.' });
+        return;
+      }
+      const response = await fetch(PARKING_AUTH_CHECK_URL, {
+        method: 'POST',
+        headers: {
+          apikey: PARKING_PUBLIC_KEY,
+          Authorization: `Bearer ${data.session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      });
+      const result: unknown = await response.json().catch(() => null);
+      const payload = result && typeof result === 'object' ? result as Record<string, unknown> : {};
+      const authorized = response.ok && payload.authorized === true;
+      const reason = typeof payload.error === 'string' ? payload.error : '';
+      setParkingAuthResult(authorized
+        ? { ok: true, message: 'Administratorzugang bestätigt. Die API akzeptiert diese Sitzung.' }
+        : { ok: false, message: `Zugriff nicht bestätigt (HTTP ${response.status})${reason ? `: ${reason}` : ''}. Manager und Parkplatz können unterschiedliche Anmeldesysteme verwenden.` });
+    } catch {
+      setParkingAuthResult({ ok: false, message: 'Verbindung zur Parkplatz-API fehlgeschlagen. Bitte CORS-Einstellungen und Erreichbarkeit der Edge Function prüfen.' });
+    } finally {
+      setParkingAuthLoading(false);
     }
   }
 
@@ -408,6 +445,13 @@ export default function App() {
             <div><h1 style={{ margin: '0 0 6px' }}>Parkplatz</h1><p style={{ margin: 0, color: '#64748b' }}>Originale Fahrzeugkarte mit unveränderten Positionen und Bildern. Die Parkplatz-Anmeldung erfolgt separat.</p></div>
             <button type="button" onClick={() => setExpandedFrame(expandedFrame === 'Parkplatz' ? null : 'Parkplatz')} style={{ ...button, marginLeft: 'auto' }}>{expandedFrame === 'Parkplatz' ? 'Vollbild schließen' : 'Vollbild'}</button>
             <a href={`${import.meta.env.BASE_URL}parking/index.html`} target="_blank" rel="noopener noreferrer" style={{ ...button, textDecoration: 'none', display: 'inline-flex', gap: 8, alignItems: 'center' }}><ExternalLink size={16} /> In neuem Fenster öffnen</a>
+          </div>
+          <div style={{ ...card, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <button type="button" onClick={() => void checkParkingAdminAccess()} disabled={parkingAuthLoading} style={{ ...button, opacity: parkingAuthLoading ? 0.6 : 1 }}>
+              {parkingAuthLoading ? 'Zugang wird geprüft…' : 'Administratorzugang prüfen'}
+            </button>
+            <span style={{ color: '#64748b', fontSize: 13 }}>Nur Verbindungstest – keine Fahrzeugdaten werden geändert.</span>
+            {parkingAuthResult && <p role="status" style={{ flexBasis: '100%', margin: 0, color: parkingAuthResult.ok ? '#166534' : '#b91c1c', fontSize: 13 }}>{parkingAuthResult.message}</p>}
           </div>
           <iframe title="BESICO Parkplatz" src={`${import.meta.env.BASE_URL}parking/index.html`} style={frameStyle('Parkplatz')} />
         </section>}
