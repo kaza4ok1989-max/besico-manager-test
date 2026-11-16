@@ -100,6 +100,7 @@ export default function App() {
   const [vfwData, setVfwData] = useState<VfwDashboard | null>(null);
   const [vfwLoading, setVfwLoading] = useState(false);
   const [vfwError, setVfwError] = useState('');
+  const [showAllVfwBookings, setShowAllVfwBookings] = useState(false);
   const isAdmin = session?.user.id === ADMIN_UID;
 
   useEffect(() => {
@@ -306,12 +307,18 @@ export default function App() {
                <div className="stat-card"><span>Kommende Buchungen</span><strong>{vfwData.upcomingBookings.length}</strong></div>
              </div>
              <p style={{ color: '#64748b', fontSize: 13, margin: '10px 0 12px' }}>Stand: {vfwData.date} (Europe/Berlin). Kommende Buchungen: maximal 20 Einträge.</p>
-             {vfwData.upcomingBookings.length > 0 && <div style={{ ...card, marginBottom: 18 }}>
-               <strong style={{ display: 'block', marginBottom: 12 }}>Nächste Belegungen</strong>
-               <div style={{ display: 'grid', gap: 8 }}>
-                 {vfwData.upcomingBookings.map((booking, index) => <div key={`${booking.date}-${booking.kennzeichen}-${index}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', borderBottom: '1px solid #e2e8f0', paddingBottom: 8 }}>
-                   <span><strong>{booking.kennzeichen}</strong> · {booking.date}</span>
-                   <span style={{ color: '#64748b' }}>{booking.text}</span>
+             {vfwData.upcomingBookings.length > 0 && <div style={{ marginBottom: 18 }}>
+               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
+                 <strong>Nächste Belegungen</strong>
+                 {vfwData.upcomingBookings.length > 5 && <button type="button" onClick={() => setShowAllVfwBookings(value => !value)} style={{ ...button, padding: '8px 12px' }}>
+                   {showAllVfwBookings ? 'Weniger anzeigen' : `Alle anzeigen (${vfwData.upcomingBookings.length})`}
+                 </button>}
+               </div>
+               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 12 }}>
+                 {(showAllVfwBookings ? vfwData.upcomingBookings : vfwData.upcomingBookings.slice(0, 5)).map((booking, index) => <div key={`${booking.date}-${booking.kennzeichen}-${index}`} style={{ ...card, padding: 14, display: 'grid', gap: 8 }}>
+                   <strong style={{ fontSize: 16, color: '#12365a' }}>{booking.kennzeichen}</strong>
+                   <span style={{ color: '#475569', fontSize: 13 }}>{booking.date}</span>
+                   <span style={{ justifySelf: 'start', padding: '4px 9px', borderRadius: 999, background: '#fef3c7', color: '#92400e', fontSize: 12, fontWeight: 700 }}>{booking.text}</span>
                  </div>)}
                </div>
              </div>}
@@ -333,7 +340,6 @@ export default function App() {
               </div>;
             })}</div>
           </section>}
-          <div className="notice" style={{ marginTop: 20 }}><strong>Datenbank verbunden</strong><p>Radsätze werden aus Supabase geladen. Die Zahlen beziehen sich auf gespeicherte Radsätze.</p></div>
         </>}
         {page === 'Lagerplan' && <LagerUebersicht view="Lagerplan" />}
         {page === 'Parkplatz' && <section style={{ width: '100%' }}>
