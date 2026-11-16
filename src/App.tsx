@@ -24,6 +24,37 @@ async function parkingGet<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+// Read-only statistics from the existing Vorführwagenplaner (Cloudflare D1).
+const VFW_DASHBOARD_URL = 'https://vfw-planer.jolly-fairy-7194.chatgpt.site/api/dashboard';
+type VfwBooking = { kennzeichen: string; date: string; text: string };
+type VfwDashboard = {
+  date: string;
+  totalVehicles: number;
+  occupiedToday: number;
+  availableToday: number;
+  upcomingBookings: VfwBooking[];
+};
+async function getVfwDashboard(): Promise<VfwDashboard> {
+  const response = await fetch(VFW_DASHBOARD_URL, { method: 'GET', cache: 'no-store' });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const value: unknown = await response.json();
+  if (!value || typeof value !== 'object') throw new Error('Ungültige API-Antwort');
+  const data = value as Partial<VfwDashboard>;
+  if (typeof data.date !== 'string' ||
+      typeof data.totalVehicles !== 'number' || !Number.isFinite(data.totalVehicles) ||
+      typeof data.occupiedToday !== 'number' || !Number.isFinite(data.occupiedToday) ||
+      typeof data.availableToday !== 'number' || !Number.isFinite(data.availableToday) ||
+      !Array.isArray(data.upcomingBookings)) throw new Error('Ungültige Statistikdaten');
+  return {
+    date: data.date,
+    totalVehicles: data.totalVehicles!,
+    occupiedToday: data.occupiedToday!,
+    availableToday: data.availableToday!,
+    upcomingBookings: data.upcomingBookings.filter((booking): booking is VfwBooking =>
+      !!booking && typeof booking.kennzeichen === 'string' && typeof booking.date === 'string' && typeof booking.text === 'string'),
+  };
+}
+
 type RecordData = Record<string, unknown>;
 type Radsatz = { id: string; kennzeichen: string | null; belegnummer: string | null; lager: string | null; lagerplatz: string | null; daten: RecordData | null; erstellt_am: string | null };
 const menu = [
@@ -66,6 +97,9 @@ export default function App() {
   const [parkingBranches, setParkingBranches] = useState<ParkingBranch[]>([]);
   const [parkingLoading, setParkingLoading] = useState(false);
   const [parkingError, setParkingError] = useState('');
+  const [vfwData, setVfwData] = useState<VfwDashboard | null>(null);
+  const [vfwLoading, setVfwLoading] = useState(false);
+  const [vfwError, setVfwError] = useState('');
   const isAdmin = session?.user.id === ADMIN_UID;
 
   useEffect(() => {
@@ -81,9 +115,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!isAdmin) { setRadsatzList([]); setParkingCars([]); setParkingBranches([]); return; }
+    if (!isAdmin) { setRadsatzList([]); setParkingCars([]); setParkingBranches([]); setVfwData(null); return; }
     void loadRadsaetze();
     void loadParking();
+    void loadVfw();
   }, [isAdmin]);
 
   async function loadRadsaetze() {
@@ -127,6 +162,19 @@ export default function App() {
     }
   }
 
+  async function loadVfw() {
+    setVfwLoading(true);
+    setVfwError('');
+    try {
+      setVfwData(await getVfwDashboard());
+    } catch (error) {
+      setVfwData(null);
+      setVfwError(error instanceof Error ? error.message : 'Unbekannter Fehler');
+    } finally {
+      setVfwLoading(false);
+    }
+  }
+
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setSigningIn(true); setLoginError('');
     const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
@@ -139,7 +187,7 @@ export default function App() {
   function navigate(target: string) {
     window.history.pushState({}, '', pageHref(target));
     setPage(target); setSearch('');
-    if (target === 'Dashboard') { void loadRadsaetze(); void loadParking(); }
+    if (target === 'Dashboard') { void loadRadsaetze(); void loadParking(); void loadVfw(); }
   }
   function openSchein(id: string) {
     const url = `${window.location.origin}${import.meta.env.BASE_URL}?qr=${encodeURIComponent(id)}`;
@@ -204,7 +252,7 @@ export default function App() {
           <div className="search-box"><Search size={24} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Kennzeichen, FIN, Fahrzeug, Reifen oder Lagerplatz suchen..." /></div>
           <div className="quick-actions">
             <div className="action-card" onClick={() => navigate('Einlagerungsscheine')} style={{ cursor: 'pointer' }}><Plus size={28} /><strong>Neuer Radsatz</strong></div>
-            <div className="action-card" onClick={() => { void loadRadsaetze(); void loadParking(); }} style={{ cursor: 'pointer' }}><RefreshCw size={28} /><strong>Aktualisieren</strong></div>
+            <div className="action-card" onClick={() => { void loadRadsaetze(); void loadParking(); void loadVfw(); }} style={{ cursor: 'pointer' }}><RefreshCw size={28} /><strong>Aktualisieren</strong></div>
           </div>
           <h2>Bereiche</h2>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 235px), 1fr))', gap: 14, marginBottom: 26 }}>
@@ -222,7 +270,7 @@ export default function App() {
             </button>
             <button type="button" onClick={() => navigate('Vorführwagenplan')} style={{ ...card, textAlign: 'left', cursor: 'pointer', color: '#12365a', display: 'grid', gap: 10 }}>
               <CalendarDays size={26} /><strong style={{ fontSize: 17 }}>Vorführwagenplan</strong>
-              <span style={{ fontSize: 15 }}>Fahrzeuge & Buchungen</span>
+              <span style={{ fontSize: 15 }}>{vfwLoading ? 'Daten werden geladen…' : vfwData ? `${vfwData.totalVehicles} Fahrzeuge · ${vfwData.occupiedToday} heute belegt` : 'Fahrzeuge & Buchungen'}</span>
               <span style={{ color: '#64748b', fontSize: 13 }}>Bestehenden Planer öffnen – ohne Datenübertragung</span>
               <span style={{ fontSize: 13, fontWeight: 700 }}>Plan öffnen →</span>
             </button>
@@ -246,6 +294,28 @@ export default function App() {
              </div>)}
              {parkingUnknown > 0 && <div className="stat-card"><span>Standort nicht zugeordnet</span><strong>{parkingUnknown}</strong></div>}
            </div>}
+
+           <h2>Vorführwagenplan · Übersicht</h2>
+           {vfwLoading && <p>Vorführwagen-Daten werden geladen...</p>}
+           {vfwError && <p role="alert" style={{ color: '#b91c1c' }}>Vorführwagen-Statistik nicht verfügbar ({vfwError}). Der bestehende Planer funktioniert unabhängig davon weiter.</p>}
+           {!vfwLoading && vfwData && <>
+             <div className="stats">
+               <div className="stat-card"><span>Vorführwagen gesamt</span><strong>{vfwData.totalVehicles}</strong></div>
+               <div className="stat-card"><span>Heute belegt</span><strong>{vfwData.occupiedToday}</strong></div>
+               <div className="stat-card"><span>Heute frei</span><strong>{vfwData.availableToday}</strong></div>
+               <div className="stat-card"><span>Kommende Buchungen</span><strong>{vfwData.upcomingBookings.length}</strong></div>
+             </div>
+             <p style={{ color: '#64748b', fontSize: 13, margin: '10px 0 12px' }}>Stand: {vfwData.date} (Europe/Berlin). Kommende Buchungen: maximal 20 Einträge.</p>
+             {vfwData.upcomingBookings.length > 0 && <div style={{ ...card, marginBottom: 18 }}>
+               <strong style={{ display: 'block', marginBottom: 12 }}>Nächste Belegungen</strong>
+               <div style={{ display: 'grid', gap: 8 }}>
+                 {vfwData.upcomingBookings.map((booking, index) => <div key={`${booking.date}-${booking.kennzeichen}-${index}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', borderBottom: '1px solid #e2e8f0', paddingBottom: 8 }}>
+                   <span><strong>{booking.kennzeichen}</strong> · {booking.date}</span>
+                   <span style={{ color: '#64748b' }}>{booking.text}</span>
+                 </div>)}
+               </div>
+             </div>}
+           </>}
 
           {!!query && <section style={{ marginTop: 24 }}><h2>Suchergebnisse Radsätze ({filtered.length})</h2>
             {dataLoading && <p>Radsätze werden geladen...</p>}
