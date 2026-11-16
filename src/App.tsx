@@ -7,7 +7,7 @@ import LagerUebersicht from './LagerUebersicht';
 import ExcelImportExport from './ExcelImportExport';
 import Historie from './Historie';
 import Inventur from './Inventur';
-import { Search, Warehouse, FileText, History, FileSpreadsheet, LayoutDashboard, LogOut, RefreshCw, Plus, ClipboardCheck, CarFront, CalendarDays, ExternalLink } from 'lucide-react';
+import { Search, Warehouse, FileText, History, FileSpreadsheet, LayoutDashboard, LogOut, RefreshCw, Plus, ClipboardCheck, CarFront, CalendarDays, ExternalLink, Menu as MenuIcon, X as CloseIcon } from 'lucide-react';
 
 const ADMIN_UID = '103ca84c-cb46-440f-a1df-b95c8b1b8e52';
 
@@ -106,6 +106,7 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   const [signingIn, setSigningIn] = useState(false);
   const [page, setPage] = useState(pageFromUrl);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [radsatzList, setRadsatzList] = useState<Radsatz[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
@@ -125,6 +126,17 @@ export default function App() {
   const parkingFrameRef = useRef<HTMLIFrameElement>(null);
   const [expandedFrame, setExpandedFrame] = useState<'Parkplatz' | 'Vorführwagenplan' | null>(null);
   const isAdmin = session?.user.id === ADMIN_UID;
+
+  // Make sure Xiaomi/Android uses the real device width instead of a desktop-sized canvas.
+  useEffect(() => {
+    let viewport = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+    if (!viewport) {
+      viewport = document.createElement('meta');
+      viewport.name = 'viewport';
+      document.head.appendChild(viewport);
+    }
+    viewport.content = 'width=device-width, initial-scale=1, viewport-fit=cover';
+  }, []);
 
   useEffect(() => {
     if (!expandedFrame) return;
@@ -254,7 +266,7 @@ export default function App() {
   }
   function navigate(target: string) {
     window.history.pushState({}, '', pageHref(target));
-    setPage(target); setSearch('');
+    setPage(target); setSearch(''); setMobileMenuOpen(false);
     if (target === 'Dashboard') { void loadRadsaetze(); void loadParking(); void loadVfw(); void loadAvailability(); }
   }
   function openSchein(id: string) {
@@ -308,7 +320,46 @@ export default function App() {
     </main>
   </div>;
 
-  return <div className="app">
+  return <div className="app besico-mobile-app">
+    <style>{`
+      .besico-mobile-app { min-width: 0; }
+      .besico-mobile-app .layout, .besico-mobile-app .content { min-width: 0; }
+      .besico-mobile-app .mobile-bottom-nav, .besico-mobile-app .mobile-menu-button,
+      .besico-mobile-app .mobile-menu-overlay { display: none; }
+      @media (max-width: 700px) {
+        html, body, #root { width: 100%; max-width: 100%; margin: 0; overflow-x: hidden; }
+        body { -webkit-text-size-adjust: 100%; }
+        .besico-mobile-app { width: 100%; min-height: 100dvh; overflow-x: clip; }
+        .besico-mobile-app .header { min-width: 0; padding: 10px 14px !important; gap: 8px; }
+        .besico-mobile-app .header-label { display: none !important; }
+        .besico-mobile-app .brand { min-width: 0; }
+        .besico-mobile-app .brand strong { font-size: 15px; }
+        .besico-mobile-app .header > button { padding: 8px !important; font-size: 12px; }
+        .besico-mobile-app .layout { display: block !important; width: 100%; min-width: 0; }
+        .besico-mobile-app .sidebar { display: none !important; }
+        .besico-mobile-app .content { width: 100% !important; max-width: 100% !important; box-sizing: border-box !important; padding: 16px 14px calc(100px + env(safe-area-inset-bottom)) !important; margin: 0 !important; min-width: 0; }
+        .besico-mobile-app .content > * { max-width: 100%; min-width: 0; }
+        .besico-mobile-app .welcome h1 { font-size: 23px !important; line-height: 1.2; }
+        .besico-mobile-app .welcome p { font-size: 14px; }
+        .besico-mobile-app h2 { font-size: 18px; }
+        .besico-mobile-app .search-box { width: 100%; box-sizing: border-box; }
+        .besico-mobile-app .search-box input { min-width: 0; width: 100%; font-size: 16px !important; }
+        .besico-mobile-app .quick-actions { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+        .besico-mobile-app .action-card { min-width: 0; padding: 14px 10px; }
+        .besico-mobile-app .stats { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 10px !important; }
+        .besico-mobile-app .stat-card { min-width: 0 !important; padding: 14px 12px !important; }
+        .besico-mobile-app .stat-card strong { font-size: 25px !important; }
+        .besico-mobile-app button, .besico-mobile-app input, .besico-mobile-app select { touch-action: manipulation; }
+        .besico-mobile-app input[type=date] { min-width: 0; max-width: 100%; box-sizing: border-box; font-size: 16px; }
+        .besico-mobile-app .mobile-bottom-nav { display: grid !important; grid-template-columns: repeat(5, minmax(0, 1fr)); position: fixed; bottom: 0; left: 0; right: 0; z-index: 1100; background: #fff; border-top: 1px solid #dbe3ee; padding: 7px 4px calc(7px + env(safe-area-inset-bottom)); box-shadow: 0 -5px 20px #0f172a12; }
+        .besico-mobile-app .mobile-bottom-nav button { border: 0; background: transparent; color: #64748b; padding: 7px 2px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-width: 0; min-height: 52px; font-size: 10px; font-weight: 600; cursor: pointer; }
+        .besico-mobile-app .mobile-bottom-nav button.active { color: #12365a; background: #eaf2fa; border-radius: 10px; }
+        .besico-mobile-app .mobile-menu-overlay { display: block !important; position: fixed; inset: 0; z-index: 1200; background: #0f172a80; }
+        .besico-mobile-app .mobile-menu-panel { position: absolute; bottom: 0; left: 0; right: 0; max-height: 85dvh; overflow-y: auto; background: white; border-radius: 20px 20px 0 0; padding: 20px 16px calc(24px + env(safe-area-inset-bottom)); box-shadow: 0 -10px 30px #0002; }
+        .besico-mobile-app .mobile-menu-panel button { width: 100%; min-height: 48px; display: flex; align-items: center; gap: 12px; border: 0; background: #fff; border-bottom: 1px solid #e2e8f0; text-align: left; font-size: 16px; color: #12365a; padding: 12px; }
+        .besico-mobile-app .mobile-menu-panel button.active { background: #eaf2fa; border-radius: 8px; font-weight: 700; }
+      }
+    `}</style>
     <header className="header"><div className="brand"><span className="brand-symbol">B</span><div><strong>BESICO</strong><small>REIFENLAGER</small></div></div><span className="header-label">Lagerverwaltung</span>
       <button onClick={() => void handleLogout()} style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', borderRadius: 8, border: '1px solid #94a3b8', background: 'transparent', color: 'inherit', cursor: 'pointer' }}><LogOut size={18} /> Abmelden</button>
     </header>
@@ -450,5 +501,24 @@ export default function App() {
         {page === 'Historie' && <Historie />}
       </main>
     </div>
+    <nav className="mobile-bottom-nav" aria-label="Mobile Navigation">
+      {([['Dashboard', LayoutDashboard, 'Start'], ['Lagerplan', Warehouse, 'Lager'], ['Inventur', ClipboardCheck, 'Inventur'], ['Parkplatz', CarFront, 'Parkplatz']] as const).map(([title, Icon, label]) => (
+        <button type="button" key={title} className={page === title ? 'active' : ''} onClick={() => navigate(title)} aria-label={title}>
+          <Icon size={21} /><span>{label}</span>
+        </button>
+      ))}
+      <button type="button" className={mobileMenuOpen || !['Dashboard', 'Lagerplan', 'Inventur', 'Parkplatz'].includes(page) ? 'active' : ''} onClick={() => setMobileMenuOpen(true)} aria-label="Alle Bereiche">
+        <MenuIcon size={21} /><span>Menü</span>
+      </button>
+    </nav>
+    {mobileMenuOpen && <div className="mobile-menu-overlay" onClick={() => setMobileMenuOpen(false)}>
+      <div className="mobile-menu-panel" role="dialog" aria-modal="true" aria-label="Bereiche" onClick={event => event.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <strong style={{ fontSize: 20, color: '#12365a' }}>BESICO · Bereiche</strong>
+          <button type="button" onClick={() => setMobileMenuOpen(false)} style={{ width: 'auto', border: 0 }} aria-label="Menü schließen"><CloseIcon size={24} /></button>
+        </div>
+        {menu.map(({ title, icon: Icon }) => <button type="button" key={title} className={page === title ? 'active' : ''} onClick={() => navigate(title)}><Icon size={21} />{title}</button>)}
+      </div>
+    </div>}
   </div>;
 }
