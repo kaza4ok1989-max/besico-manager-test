@@ -152,14 +152,41 @@ export default function App() {
       <aside className="sidebar">{menu.map(({ title, icon: Icon }) => <a key={title} href={pageHref(title)} className={'nav-item' + (page === title ? ' active' : '')} aria-current={page === title ? 'page' : undefined} onClick={event => { if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(title); }} style={{ cursor: 'pointer', textDecoration: 'none', color: 'inherit', display: 'flex' }}><Icon size={20} /><span>{title}</span></a>)}</aside>
       <main className="content">
         {page === 'Dashboard' && <>
-          <div className="welcome"><h1>Reifenlager</h1><p>Radsätze und Lagerplätze verwalten</p></div>
+          <div className="welcome"><h1>BESICO Manager</h1><p>Reifenlager, Parkplatz und Vorführwagenplan an einem Ort</p></div>
           <div className="search-box"><Search size={24} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Kennzeichen, FIN, Fahrzeug, Reifen oder Lagerplatz suchen..." /></div>
           <div className="quick-actions">
             <div className="action-card" onClick={() => navigate('Einlagerungsscheine')} style={{ cursor: 'pointer' }}><Plus size={28} /><strong>Neuer Radsatz</strong></div>
             <div className="action-card" onClick={() => navigate('Lagerplan')} style={{ cursor: 'pointer' }}><Warehouse size={28} /><strong>Lagerplan</strong></div>
             <div className="action-card" onClick={() => void loadRadsaetze()} style={{ cursor: 'pointer' }}><RefreshCw size={28} /><strong>Aktualisieren</strong></div>
           </div>
-          <h2>Übersicht</h2>
+          <h2>Bereiche</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 235px), 1fr))', gap: 14, marginBottom: 26 }}>
+            <button type="button" onClick={() => navigate('Lagerplan')} style={{ ...card, textAlign: 'left', cursor: 'pointer', color: '#12365a', display: 'grid', gap: 10 }}>
+              <Warehouse size={26} /><strong style={{ fontSize: 17 }}>Reifenlager</strong>
+              <span style={{ fontSize: 28, fontWeight: 800 }}>{dataLoading ? '…' : radsatzList.length} <span style={{ fontSize: 13, fontWeight: 400 }}>Radsätze</span></span>
+              <span style={{ color: '#64748b', fontSize: 13 }}>Zelt: {zelt} · Lager: {lager}</span>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>Lagerplan öffnen →</span>
+            </button>
+            <button type="button" onClick={() => navigate('Parkplatz')} style={{ ...card, textAlign: 'left', cursor: 'pointer', color: '#12365a', display: 'grid', gap: 10 }}>
+              <CarFront size={26} /><strong style={{ fontSize: 17 }}>Parkplatz</strong>
+              <span style={{ fontSize: 15 }}>Fahrzeugkarte</span>
+              <span style={{ color: '#64748b', fontSize: 13 }}>Fahrzeuge, Positionen und Status in der bestehenden Parkplatz-Anwendung</span>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>Parkplatz öffnen →</span>
+            </button>
+            <button type="button" onClick={() => navigate('Vorführwagenplan')} style={{ ...card, textAlign: 'left', cursor: 'pointer', color: '#12365a', display: 'grid', gap: 10 }}>
+              <CalendarDays size={26} /><strong style={{ fontSize: 17 }}>Vorführwagenplan</strong>
+              <span style={{ fontSize: 15 }}>Fahrzeuge & Buchungen</span>
+              <span style={{ color: '#64748b', fontSize: 13 }}>Bestehenden Planer öffnen – ohne Datenübertragung</span>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>Plan öffnen →</span>
+            </button>
+            <button type="button" onClick={() => navigate('Inventur')} style={{ ...card, textAlign: 'left', cursor: 'pointer', color: '#12365a', display: 'grid', gap: 10 }}>
+              <ClipboardCheck size={26} /><strong style={{ fontSize: 17 }}>Inventur</strong>
+              <span style={{ fontSize: 15 }}>Prüfung der Radsätze</span>
+              <span style={{ color: '#64748b', fontSize: 13 }}>Geprüfte und nicht geprüfte Radsätze im Inventur-Bereich ansehen</span>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>Inventur öffnen →</span>
+            </button>
+          </div>
+          <h2>Reifenlager · Übersicht</h2>
           <div className="stats">{stats.map(([name, count]) => <div className="stat-card" key={name}><span>{name}</span><strong>{dataLoading ? '...' : count}</strong></div>)}</div>
           {dataError && <p role="alert" style={{ color: '#b91c1c' }}>{dataError}</p>}
           {!!query && <section style={{ marginTop: 24 }}><h2>Suchergebnisse Radsätze ({filtered.length})</h2>
