@@ -26,6 +26,23 @@ async function parkingGet<T>(path: string): Promise<T> {
 
 // Read-only statistics from the existing Vorführwagenplaner (Cloudflare D1).
 const VFW_DASHBOARD_URL = 'https://vfw-planer.jolly-fairy-7194.chatgpt.site/api/dashboard';
+const VFW_AVAILABILITY_URL = 'https://vfw-planer.jolly-fairy-7194.chatgpt.site/api/availability';
+const berlinToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+type AvailableVehicle = { id: string | number; kennzeichen: string };
+type VfwAvailability = { from: string; to: string; periodDays: number; availableCount: number; availableVehicles: AvailableVehicle[] };
+async function getVfwAvailability(from?: string, to?: string): Promise<VfwAvailability> {
+  const url = from && to ? `${VFW_AVAILABILITY_URL}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}` : VFW_AVAILABILITY_URL;
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const value: unknown = await response.json();
+  if (!value || typeof value !== 'object') throw new Error('Ungültige API-Antwort');
+  const data = value as Partial<VfwAvailability>;
+  if (typeof data.from !== 'string' || typeof data.to !== 'string' ||
+      typeof data.availableCount !== 'number' || !Array.isArray(data.availableVehicles)) throw new Error('Ungültige Verfügbarkeitsdaten');
+  return { from: data.from, to: data.to, periodDays: data.periodDays || 1, availableCount: data.availableCount,
+    availableVehicles: data.availableVehicles.filter((vehicle): vehicle is AvailableVehicle =>
+      !!vehicle && (typeof vehicle.id === 'string' || typeof vehicle.id === 'number') && typeof vehicle.kennzeichen === 'string') };
+}
 type VfwBooking = { kennzeichen: string; date: string; text: string };
 type VfwDashboard = {
   date: string;
@@ -100,7 +117,11 @@ export default function App() {
   const [vfwData, setVfwData] = useState<VfwDashboard | null>(null);
   const [vfwLoading, setVfwLoading] = useState(false);
   const [vfwError, setVfwError] = useState('');
-  const [showAllVfwBookings, setShowAllVfwBookings] = useState(false);
+  const [vfwAvailability, setVfwAvailability] = useState<VfwAvailability | null>(null);
+  const [availabilityLoading, setAvailabilityLoading] = useState(false);
+  const [availabilityError, setAvailabilityError] = useState('');
+  const [availabilityFrom, setAvailabilityFrom] = useState(berlinToday);
+  const [availabilityTo, setAvailabilityTo] = useState(berlinToday);
   const isAdmin = session?.user.id === ADMIN_UID;
 
   useEffect(() => {
@@ -116,10 +137,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!isAdmin) { setRadsatzList([]); setParkingCars([]); setParkingBranches([]); setVfwData(null); return; }
+    if (!isAdmin) { setRadsatzList([]); setParkingCars([]); setParkingBranches([]); setVfwData(null); setVfwAvailability(null); return; }
     void loadRadsaetze();
     void loadParking();
     void loadVfw();
+    void loadAvailability();
   }, [isAdmin]);
 
   async function loadRadsaetze() {
@@ -176,6 +198,19 @@ export default function App() {
     }
   }
 
+  async function loadAvailability(from?: string, to?: string) {
+    setAvailabilityLoading(true);
+    setAvailabilityError('');
+    try {
+      setVfwAvailability(await getVfwAvailability(from, to));
+    } catch (error) {
+      setVfwAvailability(null);
+      setAvailabilityError(error instanceof Error ? error.message : 'Unbekannter Fehler');
+    } finally {
+      setAvailabilityLoading(false);
+    }
+  }
+
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setSigningIn(true); setLoginError('');
     const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
@@ -188,7 +223,7 @@ export default function App() {
   function navigate(target: string) {
     window.history.pushState({}, '', pageHref(target));
     setPage(target); setSearch('');
-    if (target === 'Dashboard') { void loadRadsaetze(); void loadParking(); void loadVfw(); }
+    if (target === 'Dashboard') { void loadRadsaetze(); void loadParking(); void loadVfw(); void loadAvailability(); }
   }
   function openSchein(id: string) {
     const url = `${window.location.origin}${import.meta.env.BASE_URL}?qr=${encodeURIComponent(id)}`;
@@ -253,7 +288,7 @@ export default function App() {
           <div className="search-box"><Search size={24} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Kennzeichen, FIN, Fahrzeug, Reifen oder Lagerplatz suchen..." /></div>
           <div className="quick-actions">
             <div className="action-card" onClick={() => navigate('Einlagerungsscheine')} style={{ cursor: 'pointer' }}><Plus size={28} /><strong>Neuer Radsatz</strong></div>
-            <div className="action-card" onClick={() => { void loadRadsaetze(); void loadParking(); void loadVfw(); }} style={{ cursor: 'pointer' }}><RefreshCw size={28} /><strong>Aktualisieren</strong></div>
+            <div className="action-card" onClick={() => { void loadRadsaetze(); void loadParking(); void loadVfw(); void loadAvailability(); }} style={{ cursor: 'pointer' }}><RefreshCw size={28} /><strong>Aktualisieren</strong></div>
           </div>
           <h2>Bereiche</h2>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 235px), 1fr))', gap: 14, marginBottom: 26 }}>
@@ -299,30 +334,41 @@ export default function App() {
            <h2>Vorführwagenplan · Übersicht</h2>
            {vfwLoading && <p>Vorführwagen-Daten werden geladen...</p>}
            {vfwError && <p role="alert" style={{ color: '#b91c1c' }}>Vorführwagen-Statistik nicht verfügbar ({vfwError}). Der bestehende Planer funktioniert unabhängig davon weiter.</p>}
-           {!vfwLoading && vfwData && <>
-             <div className="stats">
-               <div className="stat-card"><span>Vorführwagen gesamt</span><strong>{vfwData.totalVehicles}</strong></div>
-               <div className="stat-card"><span>Heute belegt</span><strong>{vfwData.occupiedToday}</strong></div>
-               <div className="stat-card"><span>Heute frei</span><strong>{vfwData.availableToday}</strong></div>
-               <div className="stat-card"><span>Kommende Buchungen</span><strong>{vfwData.upcomingBookings.length}</strong></div>
-             </div>
-             <p style={{ color: '#64748b', fontSize: 13, margin: '10px 0 12px' }}>Stand: {vfwData.date} (Europe/Berlin). Kommende Buchungen: maximal 20 Einträge.</p>
-             {vfwData.upcomingBookings.length > 0 && <div style={{ marginBottom: 18 }}>
-               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
-                 <strong>Nächste Belegungen</strong>
-                 {vfwData.upcomingBookings.length > 5 && <button type="button" onClick={() => setShowAllVfwBookings(value => !value)} style={{ ...button, padding: '8px 12px' }}>
-                   {showAllVfwBookings ? 'Weniger anzeigen' : `Alle anzeigen (${vfwData.upcomingBookings.length})`}
-                 </button>}
+           {!vfwLoading && vfwData && <div className="stats">
+             <div className="stat-card"><span>Vorführwagen gesamt</span><strong>{vfwData.totalVehicles}</strong></div>
+             <div className="stat-card"><span>Heute belegt</span><strong>{vfwData.occupiedToday}</strong></div>
+             <div className="stat-card"><span>Heute frei</span><strong>{vfwData.availableToday}</strong></div>
+           </div>}
+           <section style={{ ...card, marginTop: 18, marginBottom: 24 }}>
+             <h3 style={{ margin: '0 0 8px', color: '#12365a' }}>Freie Vorführwagen</h3>
+             <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 16px' }}>Heute freie Fahrzeuge anzeigen oder einen Zeitraum auswählen. Ein Fahrzeug ist nur frei, wenn es an allen ausgewählten Tagen verfügbar ist.</p>
+             <form onSubmit={event => { event.preventDefault(); if (availabilityFrom && availabilityTo && availabilityFrom <= availabilityTo) void loadAvailability(availabilityFrom, availabilityTo); }} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'end', gap: 12, marginBottom: 16 }}>
+               <label style={{ display: 'grid', gap: 5, fontWeight: 600, fontSize: 13 }}>Von
+                 <input type="date" required value={availabilityFrom} onChange={event => { setAvailabilityFrom(event.target.value); if (availabilityTo < event.target.value) setAvailabilityTo(event.target.value); }} style={{ padding: 9, borderRadius: 8, border: '1px solid #cbd5e1' }} />
+               </label>
+               <label style={{ display: 'grid', gap: 5, fontWeight: 600, fontSize: 13 }}>Bis
+                 <input type="date" required min={availabilityFrom} value={availabilityTo} onChange={event => setAvailabilityTo(event.target.value)} style={{ padding: 9, borderRadius: 8, border: '1px solid #cbd5e1' }} />
+               </label>
+               <button type="submit" disabled={availabilityLoading || !availabilityFrom || !availabilityTo || availabilityFrom > availabilityTo} style={{ ...button, opacity: availabilityLoading ? 0.6 : 1 }}>{availabilityLoading ? 'Wird geprüft…' : 'Verfügbarkeit prüfen'}</button>
+               <button type="button" disabled={availabilityLoading} onClick={() => { const today = berlinToday(); setAvailabilityFrom(today); setAvailabilityTo(today); void loadAvailability(); }} style={{ ...button, background: '#e2e8f0', color: '#12365a' }}>Heute</button>
+             </form>
+             {availabilityError && <p role="alert" style={{ color: '#b91c1c' }}>Verfügbarkeit konnte nicht geladen werden ({availabilityError}).</p>}
+             {availabilityLoading && <p>Freie Fahrzeuge werden geladen…</p>}
+             {!availabilityLoading && vfwAvailability && <>
+               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 12, marginBottom: 14 }}>
+                 <strong style={{ color: '#12365a', fontSize: 17 }}>Freie Fahrzeuge: {vfwAvailability.availableCount}</strong>
+                 <span style={{ color: '#64748b', fontSize: 13 }}>{vfwAvailability.from === vfwAvailability.to ? `Am ${vfwAvailability.from}` : `${vfwAvailability.from} – ${vfwAvailability.to}`}</span>
                </div>
-               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 12 }}>
-                 {(showAllVfwBookings ? vfwData.upcomingBookings : vfwData.upcomingBookings.slice(0, 5)).map((booking, index) => <div key={`${booking.date}-${booking.kennzeichen}-${index}`} style={{ ...card, padding: 14, display: 'grid', gap: 8 }}>
-                   <strong style={{ fontSize: 16, color: '#12365a' }}>{booking.kennzeichen}</strong>
-                   <span style={{ color: '#475569', fontSize: 13 }}>{booking.date}</span>
-                   <span style={{ justifySelf: 'start', padding: '4px 9px', borderRadius: 999, background: '#fef3c7', color: '#92400e', fontSize: 12, fontWeight: 700 }}>{booking.text}</span>
-                 </div>)}
-               </div>
-             </div>}
-           </>}
+               {vfwAvailability.availableVehicles.length === 0 ? <p>Keine Fahrzeuge im ausgewählten Zeitraum frei.</p> :
+                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 190px), 1fr))', gap: 10 }}>
+                   {vfwAvailability.availableVehicles.map(vehicle => <div key={vehicle.id} style={{ border: '1px solid #dbe3ee', borderRadius: 10, padding: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                     <strong style={{ color: '#12365a' }}>{vehicle.kennzeichen}</strong>
+                     <span style={{ borderRadius: 999, padding: '4px 9px', background: '#dcfce7', color: '#166534', fontSize: 12, fontWeight: 700 }}>Frei</span>
+                   </div>)}
+                 </div>}
+             </>}
+             <button type="button" onClick={() => navigate('Vorführwagenplan')} style={{ ...button, marginTop: 16, background: '#e2e8f0', color: '#12365a' }}>Vorführwagenplan öffnen →</button>
+           </section>
 
           {!!query && <section style={{ marginTop: 24 }}><h2>Suchergebnisse Radsätze ({filtered.length})</h2>
             {dataLoading && <p>Radsätze werden geladen...</p>}
