@@ -53,6 +53,9 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const [assignStockId, setAssignStockId] = useState('');
   const [assignPlaceId, setAssignPlaceId] = useState('');
   const [dropHoverPlaceId, setDropHoverPlaceId] = useState<string | null>(null);
+  const [selectedPlanPlaceId, setSelectedPlanPlaceId] = useState('');
+  const [branchPrintArea, setBranchPrintArea] = useState('all');
+  const [branchPrintFree, setBranchPrintFree] = useState(true);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -109,7 +112,13 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
 
   const availableWarehouses = branchWarehouses.filter(item => item.standort_id === standortId);
   const selectedWarehouse = availableWarehouses.find(item => item.id === selectedWarehouseId);
-  useEffect(() => { setAssignPlaceId(''); setDropHoverPlaceId(null); }, [selectedWarehouseId]);
+  useEffect(() => {
+    setAssignPlaceId(''); setDropHoverPlaceId(null); setSelectedPlanPlaceId(''); setBranchPrintArea('all');
+  }, [selectedWarehouseId]);
+  useEffect(() => {
+    if (!assignStockId) return;
+    document.getElementById('filiale-platz-zuweisen')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [assignStockId]);
 
 
   // Never query across branches: retrieve receipts only by this city's warehouse IDs.
@@ -341,7 +350,7 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       if (writeError) throw new Error(writeError.message);
       if (updated?.length !== 1) throw new Error('Keine Änderung bestätigt. Bestand bitte erneut laden.');
       setStockMessage(`${set.kennzeichen || 'Radsatz'} → ${selectedWarehouse.name} / ${slot.label} gespeichert.`);
-      setAssignStockId(''); setAssignPlaceId('');
+      setAssignStockId(''); setAssignPlaceId(''); setSelectedPlanPlaceId('');
       setBranchStockRefresh(n => n + 1);
       setStructureReload(n => n + 1);
     } catch (cause) {
@@ -659,27 +668,97 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     return priority(a) - priority(b) || naturalSort(a, b);
   };
   const canDeleteStructure = warehouseWheelCount === 0 && !layoutBusy;
+
+  const printedAreas = areas.filter(area => area.lager_id === selectedWarehouseId);
+  const printAreaOptions = [...printedAreas].sort((a, b) => a.name.localeCompare(b.name, 'de', { numeric: true }));
+  const escPrint = (value: unknown) => String(value ?? '').replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+  function printBranchList() {
+    if (!selectedWarehouse || !stockIsVerified || structureReadFailed || stockWorking) {
+      setStockError('Druck nicht möglich: Bestand und Lagerstruktur bitte zuerst aktualisieren.');
+      return;
+    }
+    const includedAreas = branchPrintArea === 'all'
+      ? printedAreas : printedAreas.filter(area => area.id === branchPrintArea);
+    const printableSlots = newWarehouseSlots
+      .filter(slot => includedAreas.some(area => area.id === slot.area.id))
+      .sort((a, b) => a.area.name.localeCompare(b.area.name, 'de', { numeric: true }) ||
+        a.place.platz_nummer.localeCompare(b.place.platz_nummer, 'de', { numeric: true }) ||
+        levelSort(a.place.ebene, b.place.ebene));
+    const lines: { gruppe: string; ebene: string; platz: string; kennzeichen: string; beleg: string }[] = [];
+    for (const slot of printableSlots) {
+      const sets = stockForPlace(slot.label);
+      if (sets.length) {
+        for (const set of sets) lines.push({ gruppe: `${slot.area.typ} ${slot.area.name}`,
+          ebene: slot.place.ebene, platz: slot.label, kennzeichen: set.kennzeichen || 'Ohne Kennzeichen', beleg: set.belegnummer || '' });
+      } else if (branchPrintFree) {
+        lines.push({ gruppe: `${slot.area.typ} ${slot.area.name}`, ebene: slot.place.ebene,
+          platz: slot.label, kennzeichen: 'Frei', beleg: '' });
+      }
+    }
+    // Only truly unassigned or older unrecognized locations, and never a set
+    // from another branch/warehouse. They must not disappear from the printout.
+    for (const set of warehouseStock) {
+      if (branchPrintArea !== 'all' && !printableSlots.some(slot => norm(slot.label) === norm(set.lagerplatz))) continue;
+      if (printableSlots.some(slot => norm(slot.label) === norm(set.lagerplatz))) continue;
+      lines.push({ gruppe: 'Nicht zugeordnet', ebene: '—', platz: set.lagerplatz || 'Ohne Lagerplatz',
+        kennzeichen: set.kennzeichen || 'Ohne Kennzeichen', beleg: set.belegnummer || '' });
+    }
+    const groupName = branchPrintArea === 'all' ? 'Alle Regale / Reihen'
+      : (printAreaOptions.find(area => area.id === branchPrintArea)?.name || 'Gruppe');
+    const now = new Date().toLocaleString('de-DE');
+    const rowMarkup = lines.map(line => `<tr><td>${escPrint(line.gruppe)}</td><td>${escPrint(line.ebene)}</td><td>${escPrint(line.platz)}</td><td>${escPrint(line.kennzeichen)}</td><td>${escPrint(line.beleg)}</td><td class="check">&#9633;</td></tr>`).join('');
+    const popup = window.open('', '_blank');
+    if (!popup) { setStockError('Druckfenster blockiert. Bitte Pop-ups für BESICO zulassen.'); return; }
+    popup.document.open();
+    popup.document.write(`<!doctype html><html lang="de"><head><meta charset="utf-8"><title>BESICO Lagerliste - ${escPrint(standortName)} - ${escPrint(selectedWarehouse.name)}</title><style>
+      body{font:12px Arial,sans-serif;color:#182b44;margin:22px}h1{font-size:20px;margin:0 0 5px}h2{font-size:15px;margin:0 0 14px}.meta{color:#555;margin-bottom:18px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #9aa8b9;padding:6px;text-align:left}th{background:#eaf0f7}.check{text-align:center;font-size:19px;width:55px}tr{break-inside:avoid}thead{display:table-header-group}.actions{margin-bottom:20px}button{padding:9px 15px;cursor:pointer}@media print{.actions{display:none}body{margin:0}@page{size:A4;margin:12mm}}
+    </style></head><body><div class="actions"><button onclick="window.print()">Drucken</button></div><h1>BESICO REIFENLAGER</h1><h2>Lagerliste · ${escPrint(standortName)} · ${escPrint(selectedWarehouse.name)} · ${escPrint(groupName)}</h2><div class="meta">Erstellt: ${escPrint(now)} · ${lines.length} Zeilen · ${branchPrintFree ? 'inkl. freier Plätze' : 'nur belegte Plätze'} · Lager: ${escPrint(selectedWarehouse.name)}</div><table><thead><tr><th>Regal / Reihe</th><th>Ebene</th><th>Lagerplatz</th><th>Kennzeichen</th><th>Beleg</th><th>Kontrolle</th></tr></thead><tbody>${rowMarkup || '<tr><td colspan="6">Keine Einträge für diese Auswahl.</td></tr>'}</tbody></table></body></html>`);
+    popup.document.close();
+    popup.focus();
+  }
+
+  function showStockPlace(item: BranchRadsatz) {
+    const warehouse = availableWarehouses.find(entry => entry.id === item.besico_lager_id);
+    if (!warehouse || !item.lagerplatz?.trim()) {
+      setStockMessage(`${item.kennzeichen || 'Radsatz'}: Noch kein Lagerplatz zugewiesen.`);
+      return;
+    }
+    const place = newWarehouseSlots.find(slot => norm(slot.label) === norm(item.lagerplatz));
+    setSelectedWarehouseId(warehouse.id);
+    setSelectedPlanPlaceId(warehouse.id === selectedWarehouseId ? (place?.place.id ?? '') : '');
+    setStockMessage(`${item.kennzeichen || 'Radsatz'}: ${warehouse.name} / ${item.lagerplatz}`);
+    window.setTimeout(() => document.getElementById('filiale-lagerplan')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80);
+  }
+
   function placeTile(place: LagerPlatz) {
     const slot = newWarehouseSlots.find(item => item.place.id === place.id);
     const here = slot ? stockForPlace(slot.label) : [];
     const isFree = planIsVerified && !here.length;
     const hover = dropHoverPlaceId === place.id && isFree;
+    const selectedForAssignment = assignPlaceId === place.id || selectedPlanPlaceId === place.id;
     const color = !planIsVerified ? '#e2e8f0' : here.length > 1 ? '#fed7aa' : here.length ? '#fecaca' : '#dcfce7';
     const verifiedEmpty = warehouseWheelCount === 0;
     return <div key={place.id} title={slot?.label || `${place.ebene} / ${place.platz_nummer}`}
       onDragOver={event => onBranchDragOver(event, place.id)}
       onDragLeave={() => setDropHoverPlaceId(old => old === place.id ? null : old)}
       onDrop={event => onBranchDrop(event, place.id)}
-      style={{ border: hover ? '3px dashed #2563eb' : '1px solid #cbd5e1',
+      style={{ border: hover ? '3px dashed #2563eb' : selectedForAssignment ? '3px solid #2563eb' : '1px solid #cbd5e1',
         background: hover ? '#bfdbfe' : color, borderRadius: 7, minHeight: 48,
         padding: '5px 3px', textAlign: 'center', display: 'flex', flexDirection: 'column',
         justifyContent: 'center', gap: 3, color: '#172b4d', fontSize: 11 }}>
       <strong>{place.ebene}</strong>
       <small style={{ fontSize: 10 }}>{!planIsVerified ? `Platz ${place.platz_nummer} · ungeprüft` :
         here.length > 1 ? `${here.length} Radsätze!` : here.length ? here[0].kennzeichen : `Platz ${place.platz_nummer} · Frei`}</small>
-      {here.length === 1 && <button type="button" style={{ ...btn, fontSize: 10, padding: '3px 5px' }}
-        onClick={() => { setAssignStockId(here[0].id); setAssignPlaceId(''); document.getElementById('filiale-radsaetze')?.scrollIntoView({ behavior: 'smooth' }); }}>
-        Radsatz anzeigen
+      {isFree && physicalWarehouseSelected && <button type="button" style={{ ...btn, fontSize: 10, padding: '3px 5px' }}
+        onClick={() => {
+          setAssignPlaceId(place.id);
+          setSelectedPlanPlaceId(place.id);
+          setStockMessage('Freier Platz ausgewählt. Unten einen Radsatz auswählen und „Platz zuweisen“ drücken.');
+          document.getElementById('filiale-radsaetze')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }}>
+        Platz wählen
       </button>}
       {canDeleteStructure && verifiedEmpty && <button type="button" title="Lagerplatz löschen" aria-label={`Platz ${place.ebene} ${place.platz_nummer} löschen`}
         onClick={() => void deletePlace(place)} style={{ ...btn, color: '#b91c1c', border: 'none', padding: '2px 4px', fontSize: 10, alignSelf: 'center' }}>
@@ -698,33 +777,19 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     <p style={{ color: '#64748b' }}>Jede Filiale verwaltet ihre eigenen Lager. Die vorhandenen Lager und Radsätze aus Glauchau bleiben unverändert.</p>
     <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Lager auswählen</h2>
-      {loading ? <p>Lager werden geladen...</p> : <label style={{ display: 'grid', gap: 6, maxWidth: 400 }}>
-        Lager in {standortName}
-        <select value={selectedWarehouse?.id ?? ''} onChange={event => setSelectedWarehouseId(event.target.value)} disabled={!availableWarehouses.length || saving || structureSaving || stockWorking} style={btn}>
-          {!availableWarehouses.length && <option value="">Noch kein Lager vorhanden</option>}
-          {availableWarehouses.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </select>
-      </label>}
+      {loading ? <p>Lager werden geladen...</p> : <div role="group" aria-label={`Lager in ${standortName}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {availableWarehouses.map(item => <button type="button" key={item.id} disabled={saving || structureSaving || stockWorking}
+          aria-pressed={selectedWarehouseId === item.id}
+          onClick={() => setSelectedWarehouseId(item.id)}
+          style={{ ...btn, background: selectedWarehouseId === item.id ? '#12365a' : '#fff',
+            color: selectedWarehouseId === item.id ? '#fff' : '#12365a', borderColor: selectedWarehouseId === item.id ? '#12365a' : '#cbd5e1' }}>
+          {item.name}
+        </button>)}
+      </div>}
       {!loading && !availableWarehouses.length && !error && <p>Für diese Filiale wurde noch kein Lager angelegt.</p>}
       {selectedWarehouse && <p style={{ color: '#475569', marginBottom: 0 }}>Ausgewähltes Lager: <strong>{selectedWarehouse.name}</strong></p>}
     </div>
-    <div id="filiale-radsaetze" style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
-      <h2 style={{ marginTop: 0 }}>Radsätze in {standortName}</h2>
-      <p style={{ color: '#475569', fontSize: 13 }}>
-        Excel-Importe liegen zunächst im Lager <strong>Wareneingang (Excel)</strong>, ohne festen Lagerplatz.
-        Hier sind alle Radsätze dieser Filiale sichtbar. Lager wählen, Radsatz zuweisen oder eine Karte auf einen grünen Platz ziehen.
-      </p>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
-        <strong>Gesamt: {branchStockLoading ? '…' : visibleBranchStock.length}</strong>
-        <span>Wareneingang: <strong>{branchStockLoading ? '…' : incomingCount}</strong></span>
-        {selectedWarehouse && <span>{selectedWarehouse.name}: <strong>{branchStockLoading ? '…' : selectedWarehouseCount}</strong></span>}
-        <button type="button" style={{ ...btn, display: 'inline-flex', gap: 6, alignItems: 'center' }}
-          disabled={branchStockLoading || loading} onClick={() => setBranchStockRefresh(value => value + 1)}>
-          <RefreshCw size={15} /> Bestand aktualisieren
-        </button>
-        {incomingWarehouse && selectedWarehouseId !== incomingWarehouse.id && <button type="button" style={btn}
-          onClick={() => setSelectedWarehouseId(incomingWarehouse.id)}>Wareneingang auswählen</button>}
-      </div>
+    <div style={{ scrollMarginTop: 18 }} id="filiale-hinweise">
       {branchStockError && <p role="alert" style={{ color: '#b91c1c', fontWeight: 700 }}>{branchStockError}</p>}
       {stockError && <p role="alert" style={{ color: '#b91c1c', fontWeight: 700 }}>{stockError}</p>}
       {stockMessage && <p role="status" style={{ color: '#166534', fontWeight: 700 }}>{stockMessage}</p>}
@@ -740,69 +805,56 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       {!slotNamesAreUnique && <p role="alert" style={{ color: '#b91c1c', fontSize: 12 }}>
         Mehrere Lagerplätze haben dieselbe Bezeichnung. Zur Sicherheit ist das Verschieben gesperrt.
       </p>}
-      {assignStock && <div style={{ border: '2px solid #2563eb', background: '#eff6ff', borderRadius: 10, padding: 12, marginBottom: 14 }}>
-        <strong>Platz zuweisen · {assignStock.kennzeichen}</strong>
-        <p style={{ fontSize: 12 }}>Ziel: {selectedWarehouse?.name || 'Bitte ein Lager wählen'}. Nur geprüfte freie Plätze stehen zur Auswahl.</p>
-        <div style={{ display: 'flex', alignItems: 'end', gap: 8, flexWrap: 'wrap' }}>
-          <label style={{ display: 'grid', gap: 5, flex: '1 1 240px' }}>Freier Lagerplatz
-            <select value={assignPlaceId} disabled={!planIsVerified || stockWorking || !physicalWarehouseSelected}
-              onChange={event => setAssignPlaceId(event.target.value)} style={btn}>
-              <option value="">Bitte freien Platz auswählen</option>
-              {freeNewSlots.map(slot => <option key={slot.place.id} value={slot.place.id}>{slot.label}</option>)}
-            </select>
-          </label>
-          <button type="button" style={{ ...btn, background: '#12365a', color: '#fff' }}
-            disabled={!assignPlaceId || stockWorking || !planIsVerified || !physicalWarehouseSelected}
-            onClick={() => void moveBranchStock(assignStock.id, assignPlaceId)}>Speichern</button>
-          <button type="button" style={btn} onClick={() => { setAssignStockId(''); setAssignPlaceId(''); }}>Abbrechen</button>
-        </div>
-      </div>}
 
-      {branchStockLoading ? <p>Radsätze werden geladen...</p> : !branchStockError && <>
-        <label style={{ display: 'grid', gap: 5, marginBottom: 12, maxWidth: 440 }}>
-          Radsätze suchen
-          <input value={branchStockQuery} onChange={event => setBranchStockQuery(event.target.value)}
-            placeholder="Kennzeichen, Beleg, Excel-Lagerplatz ..."
-            style={{ padding: 10, borderRadius: 8, border: '1px solid #cbd5e1' }} />
-        </label>
-        {visibleBranchStock.length === 0 && <p>Für diese Filiale wurden keine Radsätze gefunden. Bitte das Ergebnis unter „Excel Import / Export“ prüfen.</p>}
-        {visibleBranchStock.length > 0 && filteredBranchStock.length === 0 && <p>Keine Radsätze für diesen Suchbegriff.</p>}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 270px), 1fr))', gap: 10 }}>
-          {filteredBranchStock.slice(0, 100).map(item => {
-            const warehouse = availableWarehouses.find(entry => entry.id === item.besico_lager_id);
-            const previousArea = String(item.daten?.bereich_alt ?? '').trim();
-            const previousPlace = String(item.daten?.lagerplatz_alt ?? '').trim();
-            return <article key={item.id} draggable={!stockWorking && planIsVerified && physicalWarehouseSelected}
-              onDragStart={event => onBranchDragStart(event, item.id)}
-              onDragEnd={() => { setDraggedStockId(null); setDropHoverPlaceId(null); }}
-              style={{ border: assignStockId === item.id ? '2px solid #2563eb' : '1px solid #dbe3ee',
-                borderRadius: 10, padding: 12, background: '#f8fafc', cursor: planIsVerified && physicalWarehouseSelected ? 'grab' : 'default' }}>
-              <strong style={{ color: '#12365a' }}>{item.kennzeichen || 'Ohne Kennzeichen'}</strong>
-              <p style={{ margin: '7px 0', fontSize: 13 }}>Beleg: {item.belegnummer || '—'}</p>
-              <p style={{ margin: '7px 0', fontSize: 13 }}>Lager: <strong>{warehouse?.name || 'Unbekannt'}</strong></p>
-              <p style={{ margin: '7px 0', fontSize: 13 }}>Lagerplatz: {item.lagerplatz?.trim() || 'Noch nicht zugewiesen'}</p>
-              {(previousArea || previousPlace) && <p style={{ margin: '7px 0', color: '#475569', fontSize: 12 }}>
-                Excel (alter Platz): {[previousArea, previousPlace].filter(Boolean).join(' / ')}
-              </p>}
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-                <a href={qrUrl(item.id)} style={{ ...btn, textDecoration: 'none', display: 'inline-block', fontSize: 12, padding: '6px 10px' }}>
-                  <FileText size={14} style={{ verticalAlign: 'middle', marginRight: 5 }} /> Schein / QR
-                </a>
-                <button type="button" style={{ ...btn, padding: '6px 10px', fontSize: 12 }}
-                  disabled={stockWorking}
-                  onClick={() => { setAssignStockId(item.id); setAssignPlaceId(''); setStockError(''); }}>
-                  Platz zuweisen
-                </button>
-                {!!item.lagerplatz.trim() && <button type="button" style={{ ...btn, padding: '6px 10px', fontSize: 12, color: '#166534' }}
-                  disabled={stockWorking} onClick={() => void releaseBranchStock(item.id)}>Platz freigeben</button>}
-              </div>
-            </article>;
-          })}
+
+    </div>
+
+    {assignStock && <div id="filiale-platz-zuweisen" style={{ background: '#fff', border: '2px solid #2563eb', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <h2 style={{ margin: '0 0 8px' }}>Lagerplatz zuweisen · {assignStock.kennzeichen || assignStock.belegnummer || 'Radsatz'}</h2>
+      <p style={{ fontSize: 13, color: '#64748b' }}>Aktuelles Lager: {availableWarehouses.find(item => item.id === assignStock.besico_lager_id)?.name || '—'} · Aktueller Platz: {assignStock.lagerplatz || 'Nicht zugeordnet'}</p>
+      <p style={{ fontSize: 13 }}>Ziel: <strong>{selectedWarehouse?.name || 'Bitte Lager wählen'}</strong>. Nur freie Plätze im ausgewählten Lager.</p>
+      {!physicalWarehouseSelected && <p style={{ color: '#92400e', fontSize: 13 }}>Bitte oben das Ziellager auswählen (nicht Wareneingang).</p>}
+      {!planIsVerified && physicalWarehouseSelected && <p style={{ color: '#92400e', fontSize: 13 }}>Lagerplätze werden geprüft. Zuordnung ist bis zur sicheren Prüfung gesperrt.</p>}
+      {planIsVerified && physicalWarehouseSelected && <div role="group" aria-label="Freier Lagerplatz" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 210px), 1fr))', gap: 6, maxHeight: 220, overflowY: 'auto', padding: 5, border: '1px solid #dbe3ee', borderRadius: 8, marginBottom: 12 }}>
+        {freeNewSlots.map(slot => <button type="button" key={slot.place.id}
+          disabled={stockWorking}
+          aria-pressed={assignPlaceId === slot.place.id}
+          onClick={() => { setAssignPlaceId(slot.place.id); setSelectedPlanPlaceId(slot.place.id); }}
+          style={{ ...btn, textAlign: 'left', padding: '8px 10px',
+            background: assignPlaceId === slot.place.id ? '#12365a' : '#dcfce7',
+            color: assignPlaceId === slot.place.id ? '#fff' : '#166534' }}>
+          {slot.label}
+        </button>)}
+        {!freeNewSlots.length && <p style={{ margin: 4, fontSize: 13 }}>Keine freien Lagerplätze vorhanden.</p>}
+      </div>}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button type="button" style={{ ...btn, background: '#12365a', color: '#fff' }}
+          disabled={!assignPlaceId || !freeNewSlots.some(slot => slot.place.id === assignPlaceId) || stockWorking || !planIsVerified || !physicalWarehouseSelected}
+          onClick={() => void moveBranchStock(assignStock.id, assignPlaceId)}>Speichern</button>
+        <button type="button" style={btn} onClick={() => { setAssignStockId(''); setAssignPlaceId(''); }}>Abbrechen</button>
+      </div>
+    </div>}
+
+    <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <h2 style={{ margin: '0 0 12px', display: 'flex', gap: 8, alignItems: 'center' }}><Printer size={20} /> Lagerliste drucken</h2>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'end' }}>
+        <div style={{ display: 'grid', gap: 5, fontSize: 13 }}>Lager
+          <strong>{selectedWarehouse?.name || 'Bitte auswählen'}</strong>
         </div>
-        {filteredBranchStock.length > 100 && <p style={{ color: '#64748b', fontSize: 13 }}>
-          {filteredBranchStock.length} Treffer. Aus Gründen der Übersichtlichkeit werden die ersten 100 angezeigt. Bitte Suche verwenden.
-        </p>}
-      </>}
+        <label style={{ display: 'grid', gap: 5, fontSize: 13 }}>Regal / Reihe
+          <select style={btn} value={branchPrintArea} onChange={event => setBranchPrintArea(event.target.value)} disabled={!selectedWarehouse}>
+            <option value="all">Alle Regale / Reihen</option>
+            {printAreaOptions.map(area => <option key={area.id} value={area.id}>{area.typ} {area.name}</option>)}
+          </select>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, paddingBottom: 9 }}>
+          <input type="checkbox" checked={branchPrintFree} onChange={event => setBranchPrintFree(event.target.checked)} /> Freie Plätze mitdrucken
+        </label>
+        <button type="button" disabled={!selectedWarehouse || !stockIsVerified || structureReadFailed || stockWorking}
+          style={{ ...btn, background: '#12365a', color: '#fff', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          onClick={printBranchList}><Printer size={16} /> Liste drucken</button>
+      </div>
+      <p style={{ fontSize: 12, color: '#64748b', marginBottom: 0 }}>Druckt ausschließlich den Bestand von {standortName} / {selectedWarehouse?.name || 'ausgewähltem Lager'}. Radsätze ohne zugewiesenen Lagerplatz werden bei „Alle Regale / Reihen“ mitgedruckt. Keine Änderungen an Radsätzen oder Inventur.</p>
     </div>
     <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Neues Lager anlegen</h2>
@@ -818,7 +870,7 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       {error && <p role="alert" style={{ color: '#b91c1c' }}>{error}</p>}
       {message && <p role="status" style={{ color: '#166534' }}>{message}</p>}
     </div>
-    {selectedWarehouse && <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+    {selectedWarehouse && <div id="filiale-lagerplan" style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Lagerstruktur · {selectedWarehouse.name}</h2>
       <p style={{ color: '#64748b', fontSize: 13 }}>Regale, Reihen oder Bereiche anlegen. Danach Ebenen und Lagerplätze selbst festlegen. Es werden nur Daten dieses Lagers angezeigt.</p>
       {structureLoading && <p>Lagerstruktur wird geladen...</p>}
@@ -952,6 +1004,74 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
         </>}
       </>}
     </div>}
+    <div id="filiale-radsaetze" style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <h2 style={{ marginTop: 0 }}>Radsätze — unten · {standortName}</h2>
+      <p style={{ color: '#475569', fontSize: 13 }}>
+        Excel-Importe liegen zunächst im Lager <strong>Wareneingang (Excel)</strong>, ohne festen Lagerplatz.
+        Hier sind alle Radsätze dieser Filiale sichtbar. Lager oben auswählen, mit „Platz zuweisen“ einen freien Platz wählen oder eine Karte nach oben auf eine grüne Zelle ziehen.
+      </p>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+        <strong>Gesamt: {branchStockLoading ? '…' : visibleBranchStock.length}</strong>
+        <span>Wareneingang: <strong>{branchStockLoading ? '…' : incomingCount}</strong></span>
+        {selectedWarehouse && <span>{selectedWarehouse.name}: <strong>{branchStockLoading ? '…' : selectedWarehouseCount}</strong></span>}
+        <button type="button" style={{ ...btn, display: 'inline-flex', gap: 6, alignItems: 'center' }}
+          disabled={branchStockLoading || loading} onClick={() => setBranchStockRefresh(value => value + 1)}>
+          <RefreshCw size={15} /> Bestand aktualisieren
+        </button>
+        {incomingWarehouse && selectedWarehouseId !== incomingWarehouse.id && <button type="button" style={btn}
+          onClick={() => setSelectedWarehouseId(incomingWarehouse.id)}>Wareneingang auswählen</button>}
+      </div>
+
+      {branchStockLoading ? <p>Radsätze werden geladen...</p> : !branchStockError && <>
+        <label style={{ display: 'grid', gap: 5, marginBottom: 12, maxWidth: 440 }}>
+          Radsätze suchen
+          <input value={branchStockQuery} onChange={event => setBranchStockQuery(event.target.value)}
+            placeholder="Kennzeichen, Beleg, Excel-Lagerplatz ..."
+            style={{ padding: 10, borderRadius: 8, border: '1px solid #cbd5e1' }} />
+        </label>
+        {visibleBranchStock.length === 0 && <p>Für diese Filiale wurden keine Radsätze gefunden. Bitte das Ergebnis unter „Excel Import / Export“ prüfen.</p>}
+        {visibleBranchStock.length > 0 && filteredBranchStock.length === 0 && <p>Keine Radsätze für diesen Suchbegriff.</p>}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 270px), 1fr))', gap: 10 }}>
+          {filteredBranchStock.slice(0, 100).map(item => {
+            const warehouse = availableWarehouses.find(entry => entry.id === item.besico_lager_id);
+            const previousArea = String(item.daten?.bereich_alt ?? '').trim();
+            const previousPlace = String(item.daten?.lagerplatz_alt ?? '').trim();
+            return <article key={item.id} draggable={!stockWorking && planIsVerified && physicalWarehouseSelected}
+              onDragStart={event => onBranchDragStart(event, item.id)}
+              onDragEnd={() => { setDraggedStockId(null); setDropHoverPlaceId(null); }}
+              style={{ border: assignStockId === item.id ? '2px solid #2563eb' : '1px solid #dbe3ee',
+                borderRadius: 10, padding: 12, background: '#f8fafc', cursor: planIsVerified && physicalWarehouseSelected ? 'grab' : 'default' }}>
+              <strong style={{ color: '#12365a', display: 'inline-flex', alignItems: 'center', gap: 5 }}><GripVertical size={16} /> {item.kennzeichen || 'Ohne Kennzeichen'}</strong>
+              <p style={{ margin: '7px 0', fontSize: 13 }}>Beleg: {item.belegnummer || '—'}</p>
+              <p style={{ margin: '7px 0', fontSize: 13 }}>Lager: <strong>{warehouse?.name || 'Unbekannt'}</strong></p>
+              <p style={{ margin: '7px 0', fontSize: 13 }}>Lagerplatz: {item.lagerplatz?.trim() || 'Noch nicht zugewiesen'}</p>
+              {(previousArea || previousPlace) && <p style={{ margin: '7px 0', color: '#475569', fontSize: 12 }}>
+                Excel (alter Platz): {[previousArea, previousPlace].filter(Boolean).join(' / ')}
+              </p>}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                <a href={qrUrl(item.id)} style={{ ...btn, textDecoration: 'none', display: 'inline-block', fontSize: 12, padding: '6px 10px' }}>
+                  <FileText size={14} style={{ verticalAlign: 'middle', marginRight: 5 }} /> Schein / QR
+                </a>
+                <button type="button" style={{ ...btn, padding: '6px 10px', fontSize: 12 }}
+                  onClick={() => showStockPlace(item)}>
+                  Platz anzeigen
+                </button>
+                <button type="button" style={{ ...btn, padding: '6px 10px', fontSize: 12, color: '#2563eb' }}
+                  disabled={stockWorking}
+                  onClick={() => { setAssignStockId(item.id); setStockError(''); }}>
+                  Platz zuweisen
+                </button>
+                {!!item.lagerplatz.trim() && <button type="button" style={{ ...btn, padding: '6px 10px', fontSize: 12, color: '#166534' }}
+                  disabled={stockWorking} onClick={() => void releaseBranchStock(item.id)}>Platz freigeben</button>}
+              </div>
+            </article>;
+          })}
+        </div>
+        {filteredBranchStock.length > 100 && <p style={{ color: '#64748b', fontSize: 13 }}>
+          {filteredBranchStock.length} Treffer. Aus Gründen der Übersichtlichkeit werden die ersten 100 angezeigt. Bitte Suche verwenden.
+        </p>}
+      </>}
+    </div>
     <p style={{ color: '#64748b', fontSize: 13 }}>Excel-Importe werden zuerst im Wareneingang gespeichert. Radsätze können anschließend in einen ausgewählten Lagerplatz verschoben werden. Die Glauchau-Daten bleiben unverändert.</p>
   </section>;
 }
