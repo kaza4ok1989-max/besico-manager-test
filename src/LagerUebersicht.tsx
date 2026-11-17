@@ -25,7 +25,7 @@ const oldLocation = (r: Schein) => oldPlace(r).toUpperCase();
 /**
  * Warehouse setup for branches other than Glauchau.
  * Deliberately isolated from the existing Glauchau Lager/Zelt code.
- * Only creates records in besico_lager. Radsätze and places are never written here.
+ * Edits only the branch warehouse structure; existing wheel records are never deleted here.
  */
 function StandortLagerEinrichtung({ standortId, standortName }: { standortId: string; standortName: string }) {
   const [branchWarehouses, setBranchWarehouses] = useState<WarehouseInfo[]>([]);
@@ -43,6 +43,11 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const [selectedAreaId, setSelectedAreaId] = useState('');
   const [newAreaName, setNewAreaName] = useState('');
   const [newAreaType, setNewAreaType] = useState<BereichTyp>('Regal');
+  const [rowStackCount, setRowStackCount] = useState('6');
+  const [extraStackStart, setExtraStackStart] = useState('7');
+  const [extraStackCount, setExtraStackCount] = useState('1');
+  // Null means occupancy has NOT been verified; never show a potentially occupied slot as free.
+  const [warehouseWheelCount, setWarehouseWheelCount] = useState<number | null>(null);
   const [levelName, setLevelName] = useState('Unten');
   const [firstNumber, setFirstNumber] = useState('1');
   const [numberOfPlaces, setNumberOfPlaces] = useState('3');
@@ -52,6 +57,7 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const [structureReadFailed, setStructureReadFailed] = useState(false);
   const [structureMessage, setStructureMessage] = useState('');
   const [structureReload, setStructureReload] = useState(0);
+  const structureWarehouseRef = useRef('');
 
   useEffect(() => {
     let active = true;
@@ -85,9 +91,16 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     let active = true;
     setAreas([]);
     setPlaces([]);
-    setStructureMessage('');
-    setStructureError('');
+    // Keep feedback from a successful/failed delete when refreshing this same
+    // warehouse. Clear it only when the employee switches warehouses.
+    const warehouseKey = selectedWarehouse?.id ?? '';
+    if (structureWarehouseRef.current !== warehouseKey) {
+      setStructureMessage('');
+      setStructureError('');
+      structureWarehouseRef.current = warehouseKey;
+    }
     setStructureReadFailed(false);
+    setWarehouseWheelCount(null);
     if (!selectedWarehouse) {
       setStructureLoading(false);
       return () => { active = false; };
@@ -121,7 +134,13 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
             if (batch.length < 1000) break;
           }
         }
+        // A wheel belongs to the warehouse, not yet to a new-style slot. Do not
+        // infer that a slot is free if that warehouse already contains wheels.
+        const wheelResult = await supabase.from('reifenlager_scheine')
+          .select('id', { count: 'exact', head: true })
+          .eq('besico_lager_id', warehouseId);
         if (!active) return;
+        setWarehouseWheelCount(wheelResult.error ? null : wheelResult.count);
         setAreas(allAreas);
         setPlaces(allPlaces);
         setSelectedAreaId(previous => allAreas.some(area => area.id === previous) ? previous : (allAreas[0]?.id ?? ''));
@@ -184,21 +203,200 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       setStructureError('Dieser Name wird in diesem Lager bereits verwendet.');
       return;
     }
+    const stacks = Number(rowStackCount);
+    if (newAreaType === 'Reihe' && (!Number.isSafeInteger(stacks) || stacks < 1 || stacks > 100)) {
+      setStructureError('Bitte für eine Reihe 1 bis 100 Stapel auswählen.');
+      return;
+    }
     setStructureSaving(true);
     setStructureError('');
     setStructureMessage('');
+    let created: LagerBereich | null = null;
     try {
       const { data, error: insertError } = await supabase.from('besico_lager_bereiche')
         .insert({ lager_id: selectedWarehouse.id, name, typ: newAreaType })
         .select('id,lager_id,name,typ').single();
       if (insertError || !data) throw insertError ?? new Error('Bereich konnte nicht angelegt werden.');
-      const created = data as LagerBereich;
-      setNewAreaName('');
-      setAreas(previous => [...previous, created]);
+      created = data as LagerBereich;
+      setAreas(previous => [...previous, created!]);
       setSelectedAreaId(created.id);
-      setStructureMessage(`${created.typ} „${created.name}“ im Lager „${selectedWarehouse.name}“ angelegt. Jetzt Ebenen und Plätze hinzufügen.`);
+      setNewAreaName('');
+
+      if (created.typ === 'Reihe') {
+        // As in the old Glauchau layout: Stapel 1..N, each with Oben/Unten.
+        // Stored in the VERIFIED new tables only, scoped to this area's UUID.
+        const rowPlaces = Array.from({ length: stacks }, (_, i) =>
+          ['Oben', 'Unten'].map(ebene => ({
+            bereich_id: created!.id,
+            ebene,
+            platz_nummer: String(i + 1).padStart(2, '0'),
+          }))
+        ).flat();
+        const { data: inserted, error: placeError } = await supabase.from('besico_lagerplaetze')
+          .insert(rowPlaces).select('id,bereich_id,ebene,platz_nummer');
+        if (placeError || !inserted || inserted.length !== rowPlaces.length) {
+          // A failed slot insert does not undo creation of the empty row. Say so.
+          throw new Error(`Reihe „${created.name}“ wurde angelegt, aber die Plätze konnten nicht vollständig erstellt werden. Bitte „Aktualisieren“ und die Reihe prüfen. ${placeError?.message ?? ''}`);
+        }
+        setPlaces(previous => [...previous, ...(inserted as LagerPlatz[])]);
+        setExtraStackStart(String(stacks + 1));
+        setStructureMessage(`Reihe „${created.name}“ mit ${stacks} Stapeln und je zwei Ebenen (Oben / Unten) angelegt.`);
+      } else {
+        setStructureMessage(`${created.typ} „${created.name}“ im Lager „${selectedWarehouse.name}“ angelegt. Jetzt Ebenen und Plätze hinzufügen.`);
+      }
     } catch (cause) {
       setStructureError('Regal / Reihe anlegen: ' + (cause instanceof Error ? cause.message : String(cause)));
+      // Reload to reconcile any partial outcome, rather than claiming rollback.
+      setStructureReload(previous => previous + 1);
+    } finally {
+      setStructureSaving(false);
+    }
+  }
+
+  async function deleteArea(area: LagerBereich) {
+    if (layoutBusy || !selectedWarehouse || area.lager_id !== selectedWarehouse.id) return;
+    // Fail closed: don't delete any structural slots when occupancy is unknown.
+    if (warehouseWheelCount !== 0) {
+      setStructureError('Löschen ist nur erlaubt, wenn dieses Lager sicher keine Radsätze enthält. Bitte Bestand prüfen.');
+      return;
+    }
+    const count = places.filter(place => place.bereich_id === area.id).length;
+    if (!window.confirm(`${area.typ} „${area.name}“ mit ${count} Lagerplätzen wirklich löschen?\n\nNur die Lagerstruktur dieses Lagers wird gelöscht. Dieser Vorgang kann nicht rückgängig gemacht werden.`)) return;
+    setStructureSaving(true);
+    setStructureError('');
+    setStructureMessage('');
+    try {
+      // Re-check real database state immediately before the destructive action.
+      // No old Glauchau tables, wheel records, QR codes or receipts are touched.
+      const { data: current, error: areaError } = await supabase.from('besico_lager_bereiche')
+        .select('id,lager_id').eq('id', area.id).eq('lager_id', selectedWarehouse.id).single();
+      if (areaError || !current) throw areaError ?? new Error('Reihe nicht mehr vorhanden.');
+      const { count: wheelCount, error: wheelError } = await supabase.from('reifenlager_scheine')
+        .select('id', { count: 'exact', head: true }).eq('besico_lager_id', selectedWarehouse.id);
+      if (wheelError || wheelCount === null || wheelCount !== 0) {
+        throw new Error('Die Belegung konnte nicht sicher als leer bestätigt werden. Löschen abgebrochen.');
+      }
+      // Two scoped deletes are necessary because no safe server-side RPC has
+      // been verified. If the second fails, refresh and explicitly report it.
+      const { error: placeError } = await supabase.from('besico_lagerplaetze')
+        .delete().eq('bereich_id', area.id);
+      if (placeError) throw new Error('Plätze konnten nicht gelöscht werden: ' + placeError.message);
+      const { data: deleted, error: deleteError } = await supabase.from('besico_lager_bereiche')
+        .delete().eq('id', area.id).eq('lager_id', selectedWarehouse.id).select('id');
+      if (deleteError || !deleted?.length) {
+        throw new Error('Die Reihe konnte nicht gelöscht werden. Bitte nach dem Aktualisieren prüfen. ' + (deleteError?.message ?? 'Keine Zeile bestätigt.'));
+      }
+      setStructureMessage(`${area.typ} „${area.name}“ und ${count} Lagerplätze gelöscht.`);
+      if (selectedAreaId === area.id) setSelectedAreaId('');
+    } catch (cause) {
+      setStructureError('Löschen: ' + (cause instanceof Error ? cause.message : String(cause)));
+    } finally {
+      // Always reload, including on partial failure of the two DELETE steps.
+      setStructureReload(previous => previous + 1);
+      setStructureSaving(false);
+    }
+  }
+
+  // Structural deletion is deliberately forbidden until the entire selected
+  // warehouse has been confirmed empty again, immediately before deletion.
+  // No reifenlager_scheine record is ever deleted by these controls.
+  async function verifyEmptyWarehouse(warehouseId: string) {
+    const { count, error: wheelError } = await supabase.from('reifenlager_scheine')
+      .select('id', { count: 'exact', head: true }).eq('besico_lager_id', warehouseId);
+    if (wheelError || count !== 0) {
+      throw new Error('Das Lager ist nicht sicher leer. Löschen wurde zum Schutz der Radsätze abgebrochen.');
+    }
+  }
+
+  async function deletePlace(place: LagerPlatz) {
+    if (layoutBusy || !selectedWarehouse || warehouseWheelCount !== 0) return;
+    const area = areas.find(item => item.id === place.bereich_id && item.lager_id === selectedWarehouse.id);
+    if (!area || !places.some(item => item.id === place.id)) return;
+    if (!window.confirm(`Lagerplatz „${area.name} / ${place.ebene} / ${place.platz_nummer}“ wirklich löschen?\n\nDer Einlagerungsschein wird dabei nicht gelöscht.`)) return;
+    setStructureSaving(true);
+    setStructureError('');
+    setStructureMessage('');
+    try {
+      const { data: current, error: areaError } = await supabase.from('besico_lager_bereiche')
+        .select('id').eq('id', area.id).eq('lager_id', selectedWarehouse.id).single();
+      if (areaError || !current) throw areaError ?? new Error('Regal / Reihe gehört nicht zu diesem Lager.');
+      await verifyEmptyWarehouse(selectedWarehouse.id);
+      const { data, error: deleteError } = await supabase.from('besico_lagerplaetze')
+        .delete().eq('id', place.id).eq('bereich_id', area.id).select('id');
+      if (deleteError || data?.length !== 1) {
+        throw deleteError ?? new Error('Lagerplatz konnte nicht bestätigt gelöscht werden.');
+      }
+      setStructureMessage(`Lagerplatz ${area.name} / ${place.ebene} / ${place.platz_nummer} gelöscht.`);
+    } catch (cause) {
+      setStructureError('Lagerplatz löschen: ' + (cause instanceof Error ? cause.message : String(cause)));
+    } finally {
+      setStructureReload(value => value + 1);
+      setStructureSaving(false);
+    }
+  }
+
+  async function deleteStack(area: LagerBereich, stack: string) {
+    if (layoutBusy || !selectedWarehouse || warehouseWheelCount !== 0 || area.typ !== 'Reihe' || area.lager_id !== selectedWarehouse.id) return;
+    const stackPlaces = places.filter(place => place.bereich_id === area.id && place.platz_nummer === stack);
+    if (!stackPlaces.length) return;
+    if (!window.confirm(`Stapel ${Number(stack) || stack} in „${area.name}“ mit ${stackPlaces.length} Lagerplätzen löschen?`)) return;
+    setStructureSaving(true);
+    setStructureError('');
+    setStructureMessage('');
+    try {
+      const { data: current, error: areaError } = await supabase.from('besico_lager_bereiche')
+        .select('id').eq('id', area.id).eq('lager_id', selectedWarehouse.id).single();
+      if (areaError || !current) throw areaError ?? new Error('Reihe gehört nicht zu diesem Lager.');
+      await verifyEmptyWarehouse(selectedWarehouse.id);
+      const ids = stackPlaces.map(place => place.id);
+      const { data, error: deleteError } = await supabase.from('besico_lagerplaetze')
+        .delete().eq('bereich_id', area.id).in('id', ids).select('id');
+      if (deleteError || data?.length !== ids.length) {
+        throw deleteError ?? new Error('Nicht alle Lagerplätze wurden gelöscht. Bitte aktualisieren.');
+      }
+      setStructureMessage(`Stapel ${Number(stack) || stack} aus Reihe „${area.name}“ gelöscht.`);
+    } catch (cause) {
+      setStructureError('Stapel löschen: ' + (cause instanceof Error ? cause.message : String(cause)));
+    } finally {
+      setStructureReload(value => value + 1);
+      setStructureSaving(false);
+    }
+  }
+
+  async function addStacks() {
+    if (layoutBusy || !selectedWarehouse || !selectedArea || selectedArea.typ !== 'Reihe') return;
+    const first = Number(extraStackStart);
+    const count = Number(extraStackCount);
+    if (!Number.isSafeInteger(first) || first < 1 || first > 99999 ||
+        !Number.isSafeInteger(count) || count < 1 || count > 100 || first + count - 1 > 99999) {
+      setStructureError('Stapel: gültige Startnummer und Anzahl (1–100) eingeben.');
+      return;
+    }
+    const requested = Array.from({ length: count }, (_, index) => String(first + index).padStart(2, '0'));
+    // Prevent adding a new stack on top of an existing level (including a
+    // partially created stack), rather than inadvertently changing its layout.
+    if (requested.some(stack => places.some(place => place.bereich_id === selectedArea.id && place.platz_nummer === stack))) {
+      setStructureError('Mindestens ein Stapel mit dieser Nummer existiert bereits. Bitte andere Nummer wählen.');
+      return;
+    }
+    const payload = requested.flatMap(stack => ['Oben', 'Unten'].map(ebene => ({
+      bereich_id: selectedArea.id, ebene, platz_nummer: stack,
+    })));
+    setStructureSaving(true);
+    setStructureError('');
+    setStructureMessage('');
+    try {
+      const { data, error: insertError } = await supabase.from('besico_lagerplaetze')
+        .insert(payload).select('id,bereich_id,ebene,platz_nummer');
+      if (insertError || data?.length !== payload.length) {
+        throw insertError ?? new Error('Nicht alle Stapel wurden gespeichert. Bitte aktualisieren.');
+      }
+      setPlaces(previous => [...previous, ...(data as LagerPlatz[])]);
+      setExtraStackStart(String(first + count));
+      setStructureMessage(`${count} Stapel mit Oben / Unten in Reihe „${selectedArea.name}“ hinzugefügt.`);
+    } catch (cause) {
+      setStructureError('Stapel hinzufügen: ' + (cause instanceof Error ? cause.message : String(cause)));
+      setStructureReload(value => value + 1);
     } finally {
       setStructureSaving(false);
     }
@@ -251,6 +449,31 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     }
   }
 
+  // Keep old Glauchau-style stacks/levels visually familiar, while only
+  // using the new independent layout tables for these branches.
+  const naturalSort = (a: string, b: string) => a.localeCompare(b, 'de', { numeric: true });
+  const levelSort = (a: string, b: string) => {
+    const preferredOrder: Record<string, number> = { Oben: 0, Mitte: 1, Unten: 2 };
+    const priority = (level: string) => preferredOrder[level] ?? 3;
+    return priority(a) - priority(b) || naturalSort(a, b);
+  };
+  const canDeleteStructure = warehouseWheelCount === 0 && !layoutBusy;
+  function placeTile(place: LagerPlatz) {
+    const verifiedEmpty = warehouseWheelCount === 0;
+    return <div key={place.id} title={`${place.ebene} · Platz ${place.platz_nummer}`}
+      style={{ border: '1px solid #cbd5e1', background: verifiedEmpty ? '#dcfce7' : '#e2e8f0',
+        borderRadius: 7, minHeight: 39, padding: '4px 3px', textAlign: 'center',
+        display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 2,
+        color: '#172b4d', fontSize: 11 }}>
+      <strong>{place.ebene}</strong>
+      <small style={{ fontSize: 10 }}>{verifiedEmpty ? `Platz ${place.platz_nummer} · Frei` : `Platz ${place.platz_nummer} · ungeprüft`}</small>
+      {canDeleteStructure && <button type="button" title="Lagerplatz löschen" aria-label={`Platz ${place.ebene} ${place.platz_nummer} löschen`}
+        onClick={() => void deletePlace(place)} style={{ ...btn, color: '#b91c1c', border: 'none', padding: '2px 4px', fontSize: 10, alignSelf: 'center' }}>
+        <Trash2 size={12} style={{ verticalAlign: 'middle' }} /> Platz löschen
+      </button>}
+    </div>;
+  }
+
   return <section style={{ maxWidth: 1300 }}>
     <h1>Lagerplan · {standortName}</h1>
     <p style={{ color: '#64748b' }}>Jede Filiale verwaltet ihre eigenen Lager. Die vorhandenen Lager und Radsätze aus Glauchau bleiben unverändert.</p>
@@ -297,8 +520,12 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
           <label style={{ display: 'grid', gap: 6, flex: '1 1 180px', maxWidth: 320 }}>Name
             <input value={newAreaName} onChange={event => setNewAreaName(event.target.value)} maxLength={60} placeholder="z. B. Regal A, Reihe 1" style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8 }} disabled={layoutBusy} />
           </label>
+          {newAreaType === 'Reihe' && <label style={{ display: 'grid', gap: 6, width: 165 }}>Stapel pro Reihe
+            <input type="number" min={1} max={100} step={1} value={rowStackCount} onChange={event => setRowStackCount(event.target.value)}
+              disabled={layoutBusy} style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8, width: '100%', boxSizing: 'border-box' }} />
+          </label>}
           <button type="button" style={{ ...btn, background: '#12365a', color: '#fff' }} onClick={() => void createArea()} disabled={layoutBusy || !newAreaName.trim()}>
-            <Plus size={15} style={{ verticalAlign: 'middle' }} /> Regal / Reihe anlegen
+            <Plus size={15} style={{ verticalAlign: 'middle' }} /> {newAreaType === 'Reihe' ? 'Reihe mit Plätzen anlegen' : 'Regal / Bereich anlegen'}
           </button>
         </div>
         <h3>Ebenen und Lagerplätze hinzufügen</h3>
@@ -323,30 +550,91 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
             </button>
           </div>
           <p style={{ fontSize: 12, color: '#64748b' }}>Beispiel: Ebene „Unten“, Startnummer 1, Anzahl 3 ergibt die Plätze 01, 02, 03. Für weitere Ebenen einfach den Ebenennamen ändern. Pro Vorgang sind bis zu 100 Plätze möglich.</p>
+          {selectedArea?.typ === 'Reihe' && <div style={{ border: '1px dashed #cbd5e1', padding: 12, borderRadius: 8, marginBottom: 14 }}>
+            <strong>Weitere Stapel hinzufügen (Oben und Unten)</strong>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'end', marginTop: 8 }}>
+              <label style={{ display: 'grid', gap: 5 }}>Erster neuer Stapel
+                <input type="number" min={1} max={99999} value={extraStackStart} onChange={event => setExtraStackStart(event.target.value)} disabled={layoutBusy}
+                  style={{ padding: 9, width: 125, borderRadius: 8, border: '1px solid #cbd5e1' }} />
+              </label>
+              <label style={{ display: 'grid', gap: 5 }}>Anzahl Stapel
+                <input type="number" min={1} max={100} value={extraStackCount} onChange={event => setExtraStackCount(event.target.value)} disabled={layoutBusy}
+                  style={{ padding: 9, width: 125, borderRadius: 8, border: '1px solid #cbd5e1' }} />
+              </label>
+              <button type="button" style={{ ...btn, background: '#12365a', color: '#fff' }} disabled={layoutBusy} onClick={() => void addStacks()}>
+                <Plus size={15} style={{ verticalAlign: 'middle' }} /> Stapel hinzufügen
+              </button>
+            </div>
+          </div>}
         </>}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
           <h3>Übersicht der Lagerplätze</h3>
           <button type="button" style={btn} disabled={structureSaving} onClick={() => setStructureReload(n => n + 1)}><RefreshCw size={15} style={{ verticalAlign: 'middle' }} /> Aktualisieren</button>
         </div>
+        {warehouseWheelCount === null && <p style={{ color: '#92400e', fontSize: 13 }}>Belegung nicht überprüft: Plätze werden vorsichtshalber nicht als frei markiert. Löschen gesperrt.</p>}
+        {warehouseWheelCount !== null && warehouseWheelCount > 0 && <p style={{ color: '#92400e', fontSize: 13 }}>In diesem Lager sind {warehouseWheelCount} Radsätze gespeichert. Die Zuordnung zu den neuen Plätzen ist noch nicht fertig. Löschen ist gesperrt.</p>}
         {areas.length === 0 && <p>In diesem Lager wurden noch keine Regale oder Reihen angelegt.</p>}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 260px), 1fr))', gap: 12 }}>
-          {areas.map(area => {
-            const areaPlaces = places.filter(place => place.bereich_id === area.id);
-            const levels = [...new Set(areaPlaces.map(place => place.ebene))].sort((a, b) => a.localeCompare(b, 'de', { numeric: true }));
-            return <div key={area.id} style={{ border: '1px solid #dbe3ee', borderRadius: 10, padding: 12, background: '#f8fafc' }}>
-              <strong>{area.typ} {area.name}</strong>
-              <p style={{ margin: '6px 0', fontSize: 12, color: '#64748b' }}>{areaPlaces.length} Lagerplätze</p>
-              {levels.length === 0 && <p style={{ fontSize: 12, color: '#64748b' }}>Noch keine Ebenen oder Plätze angelegt.</p>}
-              {levels.map(level => <div key={level} style={{ marginTop: 12 }}>
-                <strong style={{ fontSize: 13 }}>Ebene: {level}</strong>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 7 }}>
-                  {areaPlaces.filter(place => place.ebene === level).sort((a, b) => a.platz_nummer.localeCompare(b.platz_nummer, 'de', { numeric: true }))
-                    .map(place => <span key={place.id} title={`${area.typ} ${area.name} · ${level} · Platz ${place.platz_nummer}`} style={{ background: '#e2e8f0', border: '1px solid #cbd5e1', borderRadius: 7, padding: '7px 9px', fontSize: 12, fontWeight: 700 }}>{place.platz_nummer}</span>)}
+        {areas.some(area => area.typ === 'Reihe') && <>
+          <h3 style={{ marginTop: 18 }}>Lagerplan · Reihen</h3>
+          <p style={{ color: '#64748b', fontSize: 12 }}>Wie im bisherigen Lagerplan: Jede Reihe enthält Stapel mit den Ebenen Oben und Unten. Die Anzahl der Stapel wird beim Anlegen festgelegt.</p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 125px), 1fr))', gap: 10, alignItems: 'start' }}>
+            {areas.filter(area => area.typ === 'Reihe').sort((a, b) => naturalSort(a.name, b.name)).map(area => {
+              const areaPlaces = places.filter(place => place.bereich_id === area.id);
+              const stacks = [...new Set(areaPlaces.map(place => place.platz_nummer))].sort((a, b) => naturalSort(b, a));
+              const levels = [...new Set(areaPlaces.map(place => place.ebene))].sort(levelSort);
+              return <div key={area.id} style={{ padding: 8, border: '1px solid #dbe3ee', borderRadius: 10, background: '#fff', minWidth: 0 }}>
+                <div style={{ display: 'flex', gap: 4, justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <strong style={{ fontSize: 13, overflowWrap: 'anywhere' }}>{area.name}</strong>
+                  <button type="button" title="Reihe löschen" aria-label={`Reihe ${area.name} löschen`}
+                    style={{ ...btn, color: '#b91c1c', padding: '5px 7px' }} disabled={!canDeleteStructure} onClick={() => void deleteArea(area)}><Trash2 size={15} /></button>
                 </div>
-              </div>)}
-            </div>;
-          })}
-        </div>
+                {stacks.length === 0 && <p style={{ fontSize: 12, color: '#64748b' }}>Noch keine Stapel angelegt.</p>}
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {stacks.map(stack => <div key={stack} style={{ border: '1px solid #dbe3ee', borderRadius: 8, padding: 4 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 3, marginBottom: 4 }}>
+                      <strong style={{ fontSize: 11 }}>Stapel {Number(stack) || stack}</strong>
+                      {canDeleteStructure && <button type="button" title={`Stapel ${stack} löschen`} aria-label={`Stapel ${stack} löschen`}
+                        style={{ ...btn, padding: 2, color: '#b91c1c', border: 'none' }} onClick={() => void deleteStack(area, stack)}><Trash2 size={12} /></button>}
+                    </div>
+                    <div style={{ display: 'grid', gap: 2 }}>
+                      {levels.map(level => {
+                        const place = areaPlaces.find(p => p.platz_nummer === stack && p.ebene === level);
+                        return place ? placeTile(place) : <div key={level} style={{ background: '#f1f5f9', padding: 6, textAlign: 'center', color: '#94a3b8', borderRadius: 6, fontSize: 11 }}>{level} · —</div>;
+                      })}
+                    </div>
+                  </div>)}
+                </div>
+                <p style={{ color: '#64748b', fontSize: 11, margin: '7px 0 0' }}>{areaPlaces.length} Lagerplätze</p>
+              </div>;
+            })}
+          </div>
+        </>}
+        {areas.some(area => area.typ !== 'Reihe') && <>
+          <h3 style={{ marginTop: 20 }}>Regale und Bereiche</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 10, alignItems: 'start' }}>
+            {areas.filter(area => area.typ !== 'Reihe').sort((a, b) => naturalSort(a.name, b.name)).map(area => {
+              const areaPlaces = places.filter(place => place.bereich_id === area.id);
+              const levels = [...new Set(areaPlaces.map(place => place.ebene))].sort(levelSort);
+              return <div key={area.id} style={{ border: '1px solid #dbe3ee', borderRadius: 10, padding: 10, background: '#fff' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 5 }}>
+                  <strong style={{ fontSize: 13, overflowWrap: 'anywhere' }}>{area.typ} {area.name}</strong>
+                  <button type="button" title={`${area.typ} löschen`} aria-label={`${area.typ} ${area.name} löschen`}
+                    style={{ ...btn, color: '#b91c1c', padding: '5px 7px' }} disabled={!canDeleteStructure} onClick={() => void deleteArea(area)}><Trash2 size={15} /></button>
+                </div>
+                {levels.length === 0 && <p style={{ fontSize: 12, color: '#64748b' }}>Noch keine Ebenen oder Plätze angelegt.</p>}
+                <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
+                  {levels.map(level => <div key={level}>
+                    <strong style={{ display: 'block', fontSize: 11, marginBottom: 4 }}>{level}</strong>
+                    <div style={{ display: 'grid', gap: 4 }}>
+                      {areaPlaces.filter(place => place.ebene === level).sort((a, b) => naturalSort(a.platz_nummer, b.platz_nummer)).map(place => placeTile(place))}
+                    </div>
+                  </div>)}
+                </div>
+                <p style={{ color: '#64748b', fontSize: 11, margin: '7px 0 0' }}>{areaPlaces.length} Lagerplätze</p>
+              </div>;
+            })}
+          </div>
+        </>}
       </>}
     </div>}
     <p style={{ color: '#64748b', fontSize: 13 }}>Radsätze einlagern, verschieben und Excel-Import für neue Lager bleiben gesperrt, bis die sichere Zuordnung je Lager fertiggestellt und geprüft ist. Die Glauchau-Daten werden nicht geändert.</p>
