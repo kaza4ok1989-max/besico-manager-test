@@ -57,6 +57,8 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const [branchPrintArea, setBranchPrintArea] = useState('all');
   const [branchPrintFree, setBranchPrintFree] = useState(true);
   const [toolsOpen, setToolsOpen] = useState(true);
+  const [toolsWidth, setToolsWidth] = useState(340);
+  const [resizingTools, setResizingTools] = useState(false);
   const [quickBranchOpen, setQuickBranchOpen] = useState(false);
   const [quickBranchPlate, setQuickBranchPlate] = useState('');
   const [quickBranchPlaceId, setQuickBranchPlaceId] = useState('');
@@ -840,8 +842,12 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     <h1>Lagerplan · {standortName}</h1>
     <p style={{ color: '#64748b' }}>Jede Filiale verwaltet ihre eigenen Lager. Die vorhandenen Lager und Radsätze aus Glauchau bleiben unverändert.</p>
     <style>{`
-      .besico-branch-lager .besico-branch-layout { display:grid; grid-template-columns: minmax(250px, 280px) minmax(0, 1fr); gap:14px; align-items:start; }
-      .besico-branch-lager .besico-branch-layout.tools-closed { grid-template-columns: minmax(0, 1fr); }
+      .besico-branch-lager .besico-branch-layout { display:grid; gap:0; align-items:start; min-width:0; }
+      .besico-branch-lager .besico-branch-layout.tools-closed { grid-template-columns: minmax(0, 1fr) !important; }
+      .besico-branch-lager .besico-tool-resize { cursor:col-resize; touch-action:none; align-self:stretch; min-height:350px; background:transparent; display:flex; align-items:flex-start; justify-content:center; padding-top:18px; }
+      .besico-branch-lager .besico-tool-resize:hover, .besico-branch-lager .besico-tool-resize:focus-visible { background:#e2e8f0; }
+      .besico-branch-lager .besico-tool-resize::before { content:''; display:block; height:76px; width:3px; border-radius:6px; background:#94a3b8; }
+      .besico-branch-lager .besico-warehouse-toolbar { position:sticky; top:0; z-index:15; background:#fff; }
       .besico-branch-lager .besico-tool-panel { min-width:0; max-height:calc(100vh - 32px); overflow-y:auto; position:sticky; top:12px; padding-right:3px; }
       .besico-branch-lager .besico-tool-panel > div { padding:12px !important; margin-bottom:10px !important; }
       .besico-branch-lager .besico-tool-panel h2 { font-size:15px; margin:0 0 9px !important; }
@@ -849,10 +855,13 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       .besico-branch-lager .besico-tool-panel label { min-width:0; max-width:100%; }
       .besico-branch-lager .besico-tool-panel input:not([type=checkbox]), .besico-branch-lager .besico-tool-panel select { max-width:100%; min-width:0; box-sizing:border-box; }
       .besico-branch-lager .besico-tool-panel button { max-width:100%; white-space:normal; }
-      .besico-branch-lager .besico-main-panel { min-width:0; }
+      .besico-branch-lager .besico-main-panel { min-width:0; padding-left:12px; }
       @media (max-width: 850px) {
         .besico-branch-lager .besico-branch-layout { display:block; }
         .besico-branch-lager .besico-tool-panel { position:static; max-height:none; overflow:visible; padding-right:0; margin-bottom:12px; }
+        .besico-branch-lager .besico-tool-resize { display:none !important; }
+        .besico-branch-lager .besico-main-panel { padding-left:0; }
+        .besico-branch-lager .besico-warehouse-toolbar { top:0; }
       }
     `}</style>
     <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10, flexWrap:'wrap', margin:'0 0 10px' }}>
@@ -862,8 +871,7 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       </button>
       <span style={{ color:'#64748b', fontSize:12 }}>Lagerplan · {selectedWarehouse?.name || standortName}</span>
     </div>
-    <div className={'besico-branch-layout' + (toolsOpen ? '' : ' tools-closed')}>
-      <aside id="besico-branch-tools" className="besico-tool-panel" style={{ display: toolsOpen ? 'block' : 'none' }} aria-label="Lagerverwaltung Werkzeuge">
+    <div className="besico-warehouse-toolbar" style={{ border: '1px solid #dbe3ee', borderRadius: 12, marginBottom: 12, padding: 10 }}>
     <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Lager auswählen</h2>
       {loading ? <p>Lager werden geladen...</p> : <div role="group" aria-label={`Lager in ${standortName}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
@@ -878,6 +886,10 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       {!loading && !availableWarehouses.length && !error && <p>Für diese Filiale wurde noch kein Lager angelegt.</p>}
       {selectedWarehouse && <p style={{ color: '#475569', marginBottom: 0 }}>Ausgewähltes Lager: <strong>{selectedWarehouse.name}</strong></p>}
     </div>
+    </div>
+    <div className={'besico-branch-layout' + (toolsOpen ? '' : ' tools-closed')}
+      style={{ gridTemplateColumns: toolsOpen ? `${toolsWidth}px 10px minmax(0, 1fr)` : 'minmax(0, 1fr)' }}>
+      <aside id="besico-branch-tools" className="besico-tool-panel" style={{ display: toolsOpen ? 'block' : 'none' }} aria-label="Lagerverwaltung Werkzeuge">
     <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <button type="button" style={{ ...btn, display: 'inline-flex', alignItems: 'center', gap: 7,
         background: quickBranchOpen ? '#e2e8f0' : '#12365a', color: quickBranchOpen ? '#12365a' : '#fff' }}
@@ -1013,6 +1025,25 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       </>}
     </div>}
       </aside>
+      {toolsOpen && <div className="besico-tool-resize" role="separator" tabIndex={0}
+        aria-label="Werkzeugleiste Breite ändern" aria-orientation="vertical" aria-valuemin={220} aria-valuemax={720} aria-valuenow={toolsWidth}
+        title="Ziehen, um die Werkzeugleiste breiter oder schmaler zu machen"
+        onKeyDown={event => {
+          if (event.key === 'ArrowRight') { event.preventDefault(); setToolsWidth(old => Math.min(720, old + 30)); }
+          if (event.key === 'ArrowLeft') { event.preventDefault(); setToolsWidth(old => Math.max(220, old - 30)); }
+        }}
+        onPointerDown={event => {
+          if (event.button !== 0) return;
+          event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); setResizingTools(true);
+        }}
+        onPointerMove={event => {
+          if (!resizingTools) return;
+          const left = event.currentTarget.parentElement?.getBoundingClientRect().left ?? 0;
+          const maxWidth = Math.max(220, Math.min(720, window.innerWidth - left - 230));
+          setToolsWidth(Math.max(220, Math.min(maxWidth, Math.round(event.clientX - left - 5))));
+        }}
+        onPointerUp={event => { setResizingTools(false); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
+        onPointerCancel={() => setResizingTools(false)} />}
       <div className="besico-main-panel">
     <div style={{ scrollMarginTop: 18 }} id="filiale-hinweise">
       {branchStockError && <p role="alert" style={{ color: '#b91c1c', fontWeight: 700 }}>{branchStockError}</p>}
