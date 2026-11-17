@@ -806,13 +806,22 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     const selectedForAssignment = assignPlaceId === place.id || selectedPlanPlaceId === place.id;
     const color = !planIsVerified ? '#e2e8f0' : here.length > 1 ? '#fed7aa' : here.length ? '#fecaca' : '#dcfce7';
     const verifiedEmpty = warehouseWheelCount === 0;
-    return <div key={place.id} title={slot?.label || `${place.ebene} / ${place.platz_nummer}`}
+    // As in the original Glauchau plan, an occupied place is a drag source.
+    // Never allow dragging an unverified or multiply occupied cell.
+    const canDragWheel = planIsVerified && physicalWarehouseSelected && !stockWorking &&
+      !layoutBusy && here.length === 1;
+    return <div key={place.id}
+      title={canDragWheel ? `${slot?.label || ''}: Radsatz auf einen freien Platz ziehen` : (slot?.label || `${place.ebene} / ${place.platz_nummer}`)}
+      draggable={canDragWheel}
+      onDragStart={event => { if (canDragWheel) onBranchDragStart(event, here[0].id); else event.preventDefault(); }}
+      onDragEnd={() => { setDraggedStockId(null); setDropHoverPlaceId(null); }}
       onDragOver={event => onBranchDragOver(event, place.id)}
       onDragLeave={() => setDropHoverPlaceId(old => old === place.id ? null : old)}
       onDrop={event => onBranchDrop(event, place.id)}
       style={{ border: hover ? '3px dashed #2563eb' : selectedForAssignment ? '3px solid #2563eb' : '1px solid #cbd5e1',
         background: hover ? '#bfdbfe' : color, borderRadius: 7, minHeight: 48,
         padding: '5px 3px', textAlign: 'center', display: 'flex', flexDirection: 'column',
+        cursor: canDragWheel ? 'grab' : 'default',
         justifyContent: 'center', gap: 3, color: '#172b4d', fontSize: 11 }}>
       <strong>{place.ebene}</strong>
       <small style={{ fontSize: 10 }}>{!planIsVerified ? `Platz ${place.platz_nummer} · ungeprüft` :
