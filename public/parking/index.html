@@ -723,7 +723,7 @@
 <div id="card" class="panel">
   <button id="closeCard" class="closeButton" type="button" title="Fenster schließen, Fahrzeug für Tastaturdrehung ausgewählt lassen">×</button>
   <h2 id="cardTitle">Fahrzeug</h2>
-  <p id="rotationKeyboardHint" style="display:none;font-size:13px;color:#12365a;background:#eff6ff;padding:8px;border-radius:7px">Fahrzeug drehen: linke Maustaste gedrückt halten und seitlich ziehen (15°-Schritte). Mit Shift + Ziehen verschieben. ← / → ebenfalls möglich.</p>
+  <p id="rotationKeyboardHint" style="display:none;font-size:13px;color:#12365a;background:#eff6ff;padding:8px;border-radius:7px">Fahrzeug verschieben: linke Maustaste gedrückt halten und ziehen. Mit Shift + Ziehen drehen (15°-Schritte). ← / → ebenfalls möglich.</p>
 
   <div class="formRow" id="editBranchRow" style="display:none">
     <label for="editBranch">Standort / Fahrzeug verlegen</label>
@@ -2112,8 +2112,8 @@
     );
   }
 
-  /* Mausbedienung: Linke Maustaste halten und horizontal ziehen = drehen.
-     Shift + Ziehen = Fahrzeug verschieben. Nur echte Mausereignisse verwenden:
+  /* Mausbedienung: Linke Maustaste halten und ziehen = verschieben.
+     Shift + Ziehen = Fahrzeug drehen. Nur echte Mausereignisse verwenden:
      Geräte mit Touchscreen können trotzdem eine Maus haben. */
   function enableDrag(marker, car) {
     let operation = null;
@@ -2125,7 +2125,7 @@
       const angle = normalizeAngle(Number(car.rotation_deg || 0));
       operation = {
         pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
-        mode: event.shiftKey ? 'move' : 'rotate', initialAngle: angle,
+        mode: event.shiftKey ? 'rotate' : 'move', initialAngle: angle,
         angle, moved: false
       };
       selectedCar = car;
@@ -2309,7 +2309,7 @@
   $("closeCard").addEventListener("click", () => {
     card.style.display = "none";
     if (selectedCar && isAdmin() && (branchOf(selectedCar) === 1 || branchOf(selectedCar) === 8)) {
-      setStatus("Fahrzeug ausgewählt: " + (selectedCar.fahrnummer || selectedCar.vin5 || selectedCar.model || "Fahrzeug") + ". Mit linker Maustaste ziehen oder ← / → um 15° drehen; Shift + Ziehen verschiebt. Esc beendet die Auswahl.");
+      setStatus("Fahrzeug ausgewählt: " + (selectedCar.fahrnummer || selectedCar.vin5 || selectedCar.model || "Fahrzeug") + ". Mit linker Maustaste verschieben; mit Shift + Ziehen oder ← / → um 15° drehen. Esc beendet die Auswahl.");
     }
   });
 
