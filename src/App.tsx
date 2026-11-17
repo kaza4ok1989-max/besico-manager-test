@@ -94,6 +94,13 @@ const pageFromUrl = () => {
 };
 const pageHref = (title: string) => `${import.meta.env.BASE_URL}?page=${encodeURIComponent(title)}`;
 
+// Remember the selected Reifenlager branch across page reloads (F5).
+const STANDORT_STORAGE_KEY = 'besico-reifenlager-selected-standort-id';
+const savedStandortId = (): string => {
+  try { return window.localStorage.getItem(STANDORT_STORAGE_KEY) || ''; }
+  catch { return ''; }
+};
+
 const text = (value: unknown): string => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
 // Ignore spaces, punctuation and letter case when searching plates and tyre sizes.
 const normalizeSearch = (value: unknown): string => String(value ?? '').normalize('NFKD').toLocaleLowerCase('de-DE').replace(/ß/g, 'ss').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]/gu, '');
@@ -113,7 +120,7 @@ export default function App() {
   const [radsatzList, setRadsatzList] = useState<Radsatz[]>([]);
   const [standorte, setStandorte] = useState<Standort[]>([]);
   const [lagerListe, setLagerListe] = useState<LagerInfo[]>([]);
-  const [standortId, setStandortId] = useState('');
+  const [standortId, setStandortId] = useState(savedStandortId);
   const [standortError, setStandortError] = useState('');
   const [dataLoading, setDataLoading] = useState(false);
   const [dataError, setDataError] = useState('');
@@ -178,6 +185,14 @@ export default function App() {
     void loadVfw();
     void loadAvailability();
   }, [isAdmin]);
+
+  // Persist only a branch confirmed to exist in Supabase. The initial empty or
+  // stale value must not overwrite the saved preference while branches load.
+  useEffect(() => {
+    if (!standortId || !standorte.some(item => item.id === standortId)) return;
+    try { window.localStorage.setItem(STANDORT_STORAGE_KEY, standortId); }
+    catch { /* Storage can be disabled; navigation still works for this session. */ }
+  }, [standortId, standorte]);
 
   async function loadStandorte() {
     const [branches, warehouses] = await Promise.all([
