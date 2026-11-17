@@ -139,8 +139,8 @@
       overflow: visible;
     }
 
-    .marker.admin { cursor: grab; }
-    .marker.admin:active { cursor: grabbing; }
+    .marker.admin { cursor: ew-resize; }
+    .marker.admin:active { cursor: ew-resize; }
     .marker.rotating { z-index:1001; }
     .marker.rotating .carShape { transform:translate(-50%,-50%) rotate(var(--rotation,0deg)) scale(1) !important; }
     .marker.rotating .carVin { top:calc(50% + 23px) !important; font-size:7px !important; }
@@ -721,9 +721,9 @@
 
 <!-- КАРТОЧКА МАШИНЫ -->
 <div id="card" class="panel">
-  <button id="closeCard" class="closeButton" type="button">×</button>
+  <button id="closeCard" class="closeButton" type="button" title="Fenster schließen, Fahrzeug für Tastaturdrehung ausgewählt lassen">×</button>
   <h2 id="cardTitle">Fahrzeug</h2>
-  <p id="rotationKeyboardHint" style="display:none;font-size:13px;color:#12365a;background:#eff6ff;padding:8px;border-radius:7px">Fahrzeug drehen: Tastatur ← / → (je 15°). Mit der Maus verschieben.</p>
+  <p id="rotationKeyboardHint" style="display:none;font-size:13px;color:#12365a;background:#eff6ff;padding:8px;border-radius:7px">Fahrzeug drehen: linke Maustaste gedrückt halten und seitlich ziehen (15°-Schritte). Mit Shift + Ziehen verschieben. ← / → ebenfalls möglich.</p>
 
   <div class="formRow" id="editBranchRow" style="display:none">
     <label for="editBranch">Standort / Fahrzeug verlegen</label>
@@ -2112,68 +2112,89 @@
     );
   }
 
-  /* ПЕРЕТАСКИВАНИЕ — ТОЛЬКО АДМИНИСТРАТОР */
+  /* Maus: Linksklick + Ziehen = drehen; Umschalt + Ziehen = verschieben.
+     Nur Administratoren, nur Kartenstandorte. Mobile-Touch bleibt unverändert. */
   function enableDrag(marker, car) {
-    // On phones, a finger should scroll the map, never move a vehicle in Supabase.
     if (window.matchMedia('(pointer: coarse)').matches) return;
-    let startX = 0, startY = 0, moved = false;
+    let startX = 0, startY = 0, moved = false, mode = 'rotate';
+    let originalAngle = 0, previewAngle = 0;
+    const normalizeAngle = angle => ((angle % 360) + 360) % 360;
 
-    marker.addEventListener("pointerdown", event => {
+    marker.addEventListener('pointerdown', event => {
       if (!isAdmin() || placementMode || event.button !== 0) return;
       dragging = false;
       moved = false;
+      mode = event.shiftKey ? 'move' : 'rotate';
       startX = event.clientX;
       startY = event.clientY;
+      originalAngle = normalizeAngle(Number(car.rotation_deg || 0));
+      previewAngle = originalAngle;
+      selectedCar = car;
       dragInProgress = true;
       marker.setPointerCapture(event.pointerId);
       event.preventDefault();
     });
 
-    marker.addEventListener("pointermove", event => {
+    marker.addEventListener('pointermove', event => {
       if (!marker.hasPointerCapture(event.pointerId)) return;
       const distance = Math.hypot(event.clientX - startX, event.clientY - startY);
       if (!moved && distance > 6) {
-        // Mausziehen bewegt Fahrzeuge nur; Drehung erfolgt per Tastatur ← / →.
         moved = true;
         dragging = true;
-        marker.classList.add("dragging");
+        // Während der Bedienung die große Fahrzeugkarte ausblenden.
+        card.style.display = 'none';
+        marker.classList.add(mode === 'rotate' ? 'rotating' : 'dragging');
       }
       if (!moved) return;
-      const pos = getMapPercent(event.clientX, event.clientY);
-      marker.style.left = pos.x + "%";
-      marker.style.top = pos.y + "%";
+      if (mode === 'move') {
+        const pos = getMapPercent(event.clientX, event.clientY);
+        marker.style.left = pos.x + '%';
+        marker.style.top = pos.y + '%';
+      } else {
+        // Eine Rasterstufe (15 Grad) pro 18 Pixel horizontaler Mausbewegung.
+        const steps = Math.round((event.clientX - startX) / 18);
+        previewAngle = normalizeAngle(originalAngle + steps * 15);
+        marker.querySelector('.carShape')?.style.setProperty('--rotation', `${previewAngle}deg`);
+      }
     });
 
-    marker.addEventListener("pointerup", async event => {
+    marker.addEventListener('pointerup', async event => {
       if (!marker.hasPointerCapture(event.pointerId)) return;
       marker.releasePointerCapture(event.pointerId);
-      marker.classList.remove("dragging", "rotating");
+      marker.classList.remove('dragging', 'rotating');
       if (!moved) { dragInProgress = false; return; }
-      const pos = getMapPercent(event.clientX, event.clientY);
-      const changes = {position_x: pos.x, position_y: pos.y};
+      const changes = mode === 'move'
+        ? (() => { const pos = getMapPercent(event.clientX, event.clientY); return {position_x: pos.x, position_y: pos.y}; })()
+        : {rotation_deg: previewAngle};
+      if (mode === 'rotate' && previewAngle === originalAngle) {
+        dragInProgress = false;
+        renderCars();
+        setTimeout(() => { dragging = false; }, 100);
+        return;
+      }
       savingInProgress = true;
       try {
-        setStatus("Position wird gespeichert...");
+        setStatus(mode === 'rotate' ? 'Drehung wird gespeichert...' : 'Position wird gespeichert...');
         await apiRequest(`cars?id=eq.${car.id}`, {
-          method:"PATCH", headers:{Prefer:"return=minimal"}, body:JSON.stringify(changes)
+          method:'PATCH', headers:{Prefer:'return=minimal'}, body:JSON.stringify(changes)
         });
         Object.assign(car, changes);
-        lastCarsSnapshot = "";
-        setStatus("Position gespeichert.");
+        lastCarsSnapshot = '';
+        setStatus(mode === 'rotate' ? 'Drehung gespeichert.' : 'Position gespeichert.');
       } catch (error) {
         console.error(error);
-        alert("Position konnte nicht gespeichert werden: " + error.message);
+        alert((mode === 'rotate' ? 'Drehung' : 'Position') + ' konnte nicht gespeichert werden: ' + error.message);
       } finally {
         dragInProgress = false;
         savingInProgress = false;
         renderCars();
         setTimeout(() => { dragging = false; }, 100);
-        loadCars(true);
+        void loadCars(true);
       }
     });
 
-    marker.addEventListener("pointercancel", () => {
-      marker.classList.remove("dragging", "rotating");
+    marker.addEventListener('pointercancel', () => {
+      marker.classList.remove('dragging', 'rotating');
       dragInProgress = false;
       dragging = false;
       renderCars();
@@ -2263,9 +2284,13 @@
     card.style.display = "block";
   }
 
+  // Close the large details card without losing the selected vehicle.
+  // This keeps the parking map visible while rotating with the arrow keys.
   $("closeCard").addEventListener("click", () => {
-    selectedCar = null;
     card.style.display = "none";
+    if (selectedCar && isAdmin() && (branchOf(selectedCar) === 1 || branchOf(selectedCar) === 8)) {
+      setStatus("Fahrzeug ausgewählt: " + (selectedCar.fahrnummer || selectedCar.vin5 || selectedCar.model || "Fahrzeug") + ". Mit linker Maustaste ziehen oder ← / → um 15° drehen; Shift + Ziehen verschiebt. Esc beendet die Auswahl.");
+    }
   });
 
   async function rotateSelectedCar(delta, reset = false) {
@@ -2297,10 +2322,18 @@
     if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
     const target = event.target;
     if (target instanceof Element && (target.closest("input, textarea, select, [contenteditable='true']") || target.closest("[role='textbox']"))) return;
-    if (!isAdmin() || !selectedCar || $("card").style.display !== "block") return;
+    if (!isAdmin() || !selectedCar) return;
+    if (branchOf(selectedCar) !== activeBranchId) return;
     if (branchOf(selectedCar) !== 1 && branchOf(selectedCar) !== 8) return;
     event.preventDefault();
     void rotateSelectedCar(event.key === "ArrowLeft" ? -15 : 15);
+  });
+
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || card.style.display === "block") return;
+    if (!selectedCar) return;
+    selectedCar = null;
+    setStatus("Fahrzeugauswahl beendet.");
   });
 
   /* СОХРАНЕНИЕ */
