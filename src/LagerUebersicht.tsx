@@ -56,7 +56,21 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const [selectedPlanPlaceId, setSelectedPlanPlaceId] = useState('');
   const [branchPrintArea, setBranchPrintArea] = useState('all');
   const [branchPrintFree, setBranchPrintFree] = useState(true);
-  const [toolsOpen, setToolsOpen] = useState(true);
+  // Remember the tools panel preference across F5 and page navigation.
+  const [toolsOpen, setToolsOpen] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('besico-reifenlager-tools-open') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('besico-reifenlager-tools-open', String(toolsOpen));
+    } catch {
+      // Private browsing may block browser storage; panel still works in this session.
+    }
+  }, [toolsOpen]);
   const [toolsWidth, setToolsWidth] = useState(340);
   const [resizingTools, setResizingTools] = useState(false);
   const [quickBranchOpen, setQuickBranchOpen] = useState(false);
