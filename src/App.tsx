@@ -73,7 +73,9 @@ async function getVfwDashboard(): Promise<VfwDashboard> {
 }
 
 type RecordData = Record<string, unknown>;
-type Radsatz = { id: string; kennzeichen: string | null; belegnummer: string | null; lager: string | null; lagerplatz: string | null; daten: RecordData | null; erstellt_am: string | null };
+type Standort = { id: string; name: string };
+type LagerInfo = { id: string; standort_id: string; name: string };
+type Radsatz = { besico_lager_id: string | null; id: string; kennzeichen: string | null; belegnummer: string | null; lager: string | null; lagerplatz: string | null; daten: RecordData | null; erstellt_am: string | null };
 const menu = [
   { title: 'Dashboard', icon: LayoutDashboard },
   { title: 'Lagerplan', icon: Warehouse },
@@ -109,6 +111,10 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [radsatzList, setRadsatzList] = useState<Radsatz[]>([]);
+  const [standorte, setStandorte] = useState<Standort[]>([]);
+  const [lagerListe, setLagerListe] = useState<LagerInfo[]>([]);
+  const [standortId, setStandortId] = useState('');
+  const [standortError, setStandortError] = useState('');
   const [dataLoading, setDataLoading] = useState(false);
   const [dataError, setDataError] = useState('');
   const [parkingCars, setParkingCars] = useState<ParkingCar[]>([]);
@@ -166,11 +172,29 @@ export default function App() {
 
   useEffect(() => {
     if (!isAdmin) { setRadsatzList([]); setParkingCars([]); setParkingBranches([]); setVfwData(null); setVfwAvailability(null); return; }
+    void loadStandorte();
     void loadRadsaetze();
     void loadParking();
     void loadVfw();
     void loadAvailability();
   }, [isAdmin]);
+
+  async function loadStandorte() {
+    const [branches, warehouses] = await Promise.all([
+      supabase.from('besico_standorte').select('id,name').order('name'),
+      supabase.from('besico_lager').select('id,standort_id,name').order('name')
+    ]);
+    if (branches.error || warehouses.error) {
+      setStandortError(branches.error?.message || warehouses.error?.message || 'Standorte nicht verfügbar');
+      return;
+    }
+    const items = (branches.data || []) as Standort[];
+    setStandorte(items);
+    setLagerListe((warehouses.data || []) as LagerInfo[]);
+    setStandortError('');
+    setStandortId(current => current && items.some(item => item.id === current)
+      ? current : (items.find(item => item.name.toLowerCase() === 'glauchau')?.id || items[0]?.id || ''));
+  }
 
   async function loadRadsaetze() {
     setDataLoading(true); setDataError('');
@@ -179,7 +203,7 @@ export default function App() {
       // Supabase may limit a single response; fetch all pages for correct dashboard totals.
       for (let start = 0; ; start += 1000) {
         const { data, error } = await supabase.from('reifenlager_scheine')
-          .select('id,kennzeichen,belegnummer,lager,lagerplatz,daten,erstellt_am')
+          .select('id,kennzeichen,belegnummer,lager,lagerplatz,daten,erstellt_am,besico_lager_id')
           .order('erstellt_am', { ascending: false }).range(start, start + 999);
         if (error) throw error;
         const batch = (data || []) as Radsatz[];
@@ -274,6 +298,14 @@ export default function App() {
     window.location.assign(url);
   }
 
+  const currentStandort = standorte.find(item => item.id === standortId);
+  const branchWarehouseIds = new Set(lagerListe.filter(item => item.standort_id === standortId).map(item => item.id));
+  const branchRadsaetze = radsatzList.filter(item => item.besico_lager_id && branchWarehouseIds.has(item.besico_lager_id));
+  const warehouseLabel = (item: Radsatz) => {
+    const warehouse = lagerListe.find(entry => entry.id === item.besico_lager_id);
+    const branch = standorte.find(entry => entry.id === warehouse?.standort_id);
+    return [branch?.name || 'Standort nicht zugeordnet', warehouse?.name || item.lager || 'Lager'].join(' · ');
+  };
   const query = normalizeSearch(search);
   const filtered = query ? radsatzList.filter(r => {
     const d = r.daten || {};
@@ -286,7 +318,7 @@ export default function App() {
     // 'GC-S 120' matches 'GC-S120', without merging unrelated fields.
     return values.some(value => normalizeSearch(value).includes(query));
   }) : [];
-  const assigned = radsatzList.filter(r => (r.lager === 'Zelt' || r.lager === 'Lager') && !!text(r.lagerplatz));
+  const assigned = branchRadsaetze.filter(r => !!text(r.lagerplatz));
   const zelt = assigned.filter(r => r.lager === 'Zelt').length;
   const lager = assigned.filter(r => r.lager === 'Lager').length;
   const activeParkingCars = parkingCars.filter(car => (car.yard_status || 'on_site') === 'on_site');
@@ -297,11 +329,11 @@ export default function App() {
   const parkingUnknown = activeParkingCars.filter(car =>
     !parkingBranches.some(branch => Number(branch.id) === Number(car.branch_id ?? 1))).length;
   const stats = [
-    ['Radsätze gesamt', radsatzList.length],
+    ['Radsätze gesamt', branchRadsaetze.length],
     ['Im Lager', assigned.length],
     ['Zelt', zelt],
     ['Lager', lager],
-    ['Nicht zugeordnet', radsatzList.length - assigned.length],
+    ['Nicht zugeordnet', branchRadsaetze.length - assigned.length],
   ] as const;
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center' }}>BESICO Reifenlager wird geladen...</div>;
@@ -369,6 +401,7 @@ export default function App() {
         {page === 'Dashboard' && <>
           <div className="welcome"><h1>BESICO Manager</h1><p>Reifenlager, Parkplatz und Vorführwagenplan an einem Ort</p></div>
           <div className="search-box"><Search size={24} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Kennzeichen, FIN, Fahrzeug, Reifen oder Lagerplatz suchen..." /></div>
+          <div style={{ ...card, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}><label htmlFor="standort" style={{ fontWeight: 700 }}>Filiale</label><select id="standort" value={standortId} onChange={event => setStandortId(event.target.value)} style={{ padding: 10, borderRadius: 8, border: '1px solid #cbd5e1', minWidth: 180 }}>{standorte.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select><span style={{ fontSize: 13, color: '#64748b' }}>Lagerplan und Statistik: ausgewählte Filiale. Suche: alle Filialen.</span>{standortError && <span role="alert" style={{ color: '#b91c1c' }}>{standortError}</span>}</div>
           <div className="quick-actions">
             <div className="action-card" onClick={() => navigate('Einlagerungsscheine')} style={{ cursor: 'pointer' }}><Plus size={28} /><strong>Neuer Radsatz</strong></div>
             <div className="action-card" onClick={() => { void loadRadsaetze(); void loadParking(); void loadVfw(); void loadAvailability(); }} style={{ cursor: 'pointer' }}><RefreshCw size={28} /><strong>Aktualisieren</strong></div>
@@ -376,8 +409,8 @@ export default function App() {
           <h2>Bereiche</h2>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 235px), 1fr))', gap: 14, marginBottom: 26 }}>
             <button type="button" onClick={() => navigate('Lagerplan')} style={{ ...card, textAlign: 'left', cursor: 'pointer', color: '#12365a', display: 'grid', gap: 10 }}>
-              <Warehouse size={26} /><strong style={{ fontSize: 17 }}>Reifenlager</strong>
-              <span style={{ fontSize: 28, fontWeight: 800 }}>{dataLoading ? '…' : radsatzList.length} <span style={{ fontSize: 13, fontWeight: 400 }}>Radsätze</span></span>
+              <Warehouse size={26} /><strong style={{ fontSize: 17 }}>Reifenlager · {currentStandort?.name || 'Filiale wählen'}</strong>
+              <span style={{ fontSize: 28, fontWeight: 800 }}>{dataLoading ? '…' : branchRadsaetze.length} <span style={{ fontSize: 13, fontWeight: 400 }}>Radsätze</span></span>
               <span style={{ color: '#64748b', fontSize: 13 }}>Zelt: {zelt} · Lager: {lager}</span>
               <span style={{ fontSize: 13, fontWeight: 700 }}>Lagerplan öffnen →</span>
             </button>
@@ -458,19 +491,19 @@ export default function App() {
             {!dataLoading && filtered.length === 0 && <p>Keine Radsätze gefunden.</p>}
             <div style={{ display: 'grid', gap: 10 }}>{filtered.map(r => {
               const d = r.daten || {};
-              const location = r.lager && r.lagerplatz ? `${r.lager} · ${r.lagerplatz}` : 'Nicht zugeordnet';
+              const location = `${warehouseLabel(r)} · ${r.lagerplatz || 'Nicht zugeordnet'}`;
               return <div key={r.id} style={card}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}><strong>{r.kennzeichen || 'Ohne Kennzeichen'}</strong><span style={{ color: '#9a3412' }}>{location}</span></div>
                 <p style={{ margin: '8px 0', color: '#475569' }}>{[text(d.fahrzeug), text(d.saison), text(d.reifengroesse), text(d.reifenmarke)].filter(Boolean).join(' · ') || text(r.belegnummer)}</p>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                   <button type="button" style={button} onClick={() => openSchein(r.id)}>Schein / QR öffnen</button>
-                  <button type="button" style={{ ...button, background: '#e2e8f0', color: '#12365a' }} onClick={() => navigate('Lagerplan')}>Lagerplan öffnen</button>
+                  <button type="button" style={{ ...button, background: '#e2e8f0', color: '#12365a' }} onClick={() => { const warehouse = lagerListe.find(item => item.id === r.besico_lager_id); if (warehouse) setStandortId(warehouse.standort_id); navigate('Lagerplan'); }}>Lagerplan öffnen</button>
                 </div>
               </div>;
             })}</div>
           </section>}
         </>}
-        {page === 'Lagerplan' && <LagerUebersicht view="Lagerplan" />}
+        {page === 'Lagerplan' && <><div style={{ ...card, marginBottom: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}><label htmlFor="lager-standort" style={{ fontWeight: 700 }}>Filiale</label><select id="lager-standort" value={standortId} onChange={event => setStandortId(event.target.value)} style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8 }}>{standorte.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></div><LagerUebersicht view="Lagerplan" standortId={standortId} standortName={currentStandort?.name || ''} /></>}
         {page === 'Parkplatz' && <section style={frameSectionStyle('Parkplatz')}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
             <div><h1 style={{ margin: '0 0 6px' }}>Parkplatz</h1><p style={{ margin: 0, color: '#64748b' }}>Originale Fahrzeugkarte mit unveränderten Positionen und Bildern. Die Anmeldung erfolgt automatisch über BESICO Manager.</p></div>
