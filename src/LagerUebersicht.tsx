@@ -19,6 +19,114 @@ const oldPlace = (r: Schein) => field(r, 'lagerplatz_alt');
 const oldLocation = (r: Schein) => oldPlace(r).toUpperCase();
 
 
+/**
+ * Warehouse setup for branches other than Glauchau.
+ * Deliberately isolated from the existing Glauchau Lager/Zelt code.
+ * Only creates records in besico_lager. Radsätze and places are never written here.
+ */
+function StandortLagerEinrichtung({ standortId, standortName }: { standortId: string; standortName: string }) {
+  const [branchWarehouses, setBranchWarehouses] = useState<WarehouseInfo[]>([]);
+  const [selectedWarehouseId, setSelectedWarehouseId] = useState('');
+  const [newWarehouseName, setNewWarehouseName] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [reload, setReload] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError('');
+    void (async () => {
+      const { data, error: loadError } = await supabase.from('besico_lager')
+        .select('id,standort_id,name')
+        .eq('standort_id', standortId)
+        .order('name');
+      if (!active) return;
+      if (loadError) {
+        setBranchWarehouses([]);
+        setSelectedWarehouseId('');
+        setError('Lager konnten nicht geladen werden: ' + loadError.message);
+      } else {
+        const list = (data ?? []) as WarehouseInfo[];
+        setBranchWarehouses(list);
+        setSelectedWarehouseId(previous => list.some(item => item.id === previous) ? previous : (list[0]?.id ?? ''));
+      }
+      setLoading(false);
+    })();
+    return () => { active = false; };
+  }, [standortId, reload]);
+
+  async function createWarehouse() {
+    const name = newWarehouseName.trim().replace(/\s+/g, ' ');
+    if (loading || saving) return;
+    if (!name || name.length > 60) {
+      setError('Lagername: bitte 1 bis 60 Zeichen eingeben.');
+      return;
+    }
+    if (branchWarehouses.some(item => item.name.localeCompare(name, 'de', { sensitivity: 'base' }) === 0)) {
+      setError('Ein Lager mit diesem Namen existiert bereits in dieser Filiale.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    setMessage('');
+    try {
+      // The database guarantees unique (standort_id, name); no existing data are modified.
+      const { data, error: insertError } = await supabase.from('besico_lager')
+        .insert({ standort_id: standortId, name })
+        .select('id,standort_id,name')
+        .single();
+      if (insertError || !data) throw insertError ?? new Error('Lager konnte nicht erstellt werden.');
+      const created = data as WarehouseInfo;
+      setNewWarehouseName('');
+      setMessage(`Lager „${created.name}“ wurde für ${standortName} angelegt.`);
+      setSelectedWarehouseId(created.id);
+      setReload(value => value + 1);
+    } catch (cause) {
+      setError('Lager anlegen: ' + (cause instanceof Error ? cause.message : String(cause)));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const selectedWarehouse = branchWarehouses.find(item => item.id === selectedWarehouseId);
+
+  return <section style={{ maxWidth: 1300 }}>
+    <h1>Lagerplan · {standortName}</h1>
+    <p style={{ color: '#64748b' }}>Jede Filiale verwaltet ihre eigenen Lager. Die vorhandenen Lager und Radsätze aus Glauchau bleiben unverändert.</p>
+    <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <h2 style={{ marginTop: 0 }}>Lager auswählen</h2>
+      {loading ? <p>Lager werden geladen...</p> : <label style={{ display: 'grid', gap: 6, maxWidth: 400 }}>
+        Lager in {standortName}
+        <select value={selectedWarehouseId} onChange={event => setSelectedWarehouseId(event.target.value)} disabled={!branchWarehouses.length || saving} style={btn}>
+          {!branchWarehouses.length && <option value="">Noch kein Lager vorhanden</option>}
+          {branchWarehouses.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+      </label>}
+      {!loading && !branchWarehouses.length && !error && <p>Für diese Filiale wurde noch kein Lager angelegt.</p>}
+      {selectedWarehouse && <p style={{ color: '#475569', marginBottom: 0 }}>Ausgewähltes Lager: <strong>{selectedWarehouse.name}</strong></p>}
+    </div>
+    <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16 }}>
+      <h2 style={{ marginTop: 0 }}>Neues Lager anlegen</h2>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'end' }}>
+        <label style={{ display: 'grid', gap: 6, flex: '1 1 230px', maxWidth: 400 }}>
+          Lagername
+          <input value={newWarehouseName} maxLength={60} onChange={event => setNewWarehouseName(event.target.value)} placeholder="z. B. Halle 1, Außenlager, Zelt" style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8 }} />
+        </label>
+        <button type="button" style={{ ...btn, background: '#12365a', color: '#fff' }} disabled={loading || saving || !newWarehouseName.trim()} onClick={() => void createWarehouse()}>
+          <Plus size={15} style={{ verticalAlign: 'middle' }} /> {saving ? 'Wird angelegt...' : 'Lager anlegen'}
+        </button>
+      </div>
+      {error && <p role="alert" style={{ color: '#b91c1c' }}>{error}</p>}
+      {message && <p role="status" style={{ color: '#166534' }}>{message}</p>}
+      <p style={{ fontSize: 13, color: '#64748b', marginBottom: 0 }}>Im nächsten Schritt kommen Regale, Reihen, Ebenen und Lagerplätze dazu. Einlagern und Excel-Import sind für neue Lager noch gesperrt, damit keine Radsätze falsch zugeordnet werden.</p>
+    </div>
+  </section>;
+}
+
+
 export default function LagerUebersicht({ view, standortId, standortName }: LagerUebersichtProps) {
   const [rows, setRows] = useState<Schein[]>([]);
   // The existing Zelt/Lager layout belongs to Glauchau only. Other branches
@@ -461,11 +569,7 @@ export default function LagerUebersicht({ view, standortId, standortName }: Lage
     return <section style={{ maxWidth: 1300 }}><h1>Lagerplan</h1><p>Standort wird geladen...</p></section>;
   }
   if (!isLegacyGlauchau) {
-    return <section style={{ maxWidth: 1300 }}>
-      <h1>Lagerplan · {standortName}</h1>
-      <p>Für diesen Standort wird ein eigener Lagerplan eingerichtet.</p>
-      <p style={{ color: '#64748b' }}>Die vorhandenen Regale und Radsätze aus Glauchau werden hier nicht angezeigt oder verändert. Neue Lagerplätze werden nach Prüfung der Datenbankstruktur freigeschaltet.</p>
-    </section>;
+    return <StandortLagerEinrichtung key={standortId} standortId={standortId} standortName={standortName} />;
   }
   if (loadError) {
     return <section style={{ maxWidth: 1300 }}>
