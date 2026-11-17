@@ -723,6 +723,7 @@
 <div id="card" class="panel">
   <button id="closeCard" class="closeButton" type="button">×</button>
   <h2 id="cardTitle">Fahrzeug</h2>
+  <p id="rotationKeyboardHint" style="display:none;font-size:13px;color:#12365a;background:#eff6ff;padding:8px;border-radius:7px">Fahrzeug drehen: Tastatur ← / → (je 15°). Mit der Maus verschieben.</p>
 
   <div class="formRow" id="editBranchRow" style="display:none">
     <label for="editBranch">Standort / Fahrzeug verlegen</label>
@@ -1691,11 +1692,30 @@
     const button = $("excelExportButton"); button.disabled = true; button.textContent = "Export läuft...";
     try {
       await loadExcelLibrary();
-      const [allCars, allChecks, auditRows, externalRows] = await Promise.all([
-        fetchAllRows("cars","id.asc"),
-        fetchAllRows("battery_checks","id.asc"),
-        fetchAllRows("battery_check_audit","id.asc"),
-        fetchAllRows("external_battery_events","id.asc")
+      // Autos und Batteriehistorie sind Pflicht. Weitere Tabellen sind optional:
+      // Der BESICO-Manager-Proxy kann sie derzeit mit "Table not allowed" ablehnen.
+      // Niemals eine unvollständige Datei als vollständiges Archiv ausgeben.
+      const [allCars, allChecks] = await Promise.all([
+        fetchAllRows("cars", "id.asc"),
+        fetchAllRows("battery_checks", "id.asc")
+      ]);
+      const omitted = [];
+      async function optionalExportTable(name) {
+        try {
+          return await fetchAllRows(name, "id.asc");
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          // Do not hide network/temporary failures: only known proxy restrictions
+          // can lead to an explicitly labeled partial export.
+          if (!/Table not allowed/i.test(reason)) throw error;
+          omitted.push(name);
+          console.warn("Excel-Export: Tabelle nicht freigegeben:", name);
+          return [];
+        }
+      }
+      const [auditRows, externalRows] = await Promise.all([
+        optionalExportTable("battery_check_audit"),
+        optionalExportTable("external_battery_events")
       ]);
       const carMap = new Map(allCars.map(c => [Number(c.id),c]));
       const checkMap = new Map();
@@ -1751,7 +1771,19 @@
         "Ruhespannung (V)":h.resting_voltage ?? "", "Testergebnis":h.tester_result || "", "Notizen":h.notes || ""
       }));
       add("Ohne Parkplatz",externalExport,["VIN (vollständig)","Standort","Datum","Vorgang","Ruhespannung (V)","Testergebnis","Notizen"]);
-      XLSX.writeFile(wb,`Ford_Batterie_Gesamtarchiv_${localISODate()}.xlsx`);
+      if (omitted.length) {
+        const warning = [
+          {Hinweis: "TEILEXPORT – NICHT ALS VOLLSTÄNDIGE SICHERUNG VERWENDEN"},
+          {Hinweis: "Folgende Tabellen sind über den BESICO-Manager-Zugang nicht freigegeben:"},
+          ...omitted.map(name => ({Hinweis: name})),
+          {Hinweis: "Fahrzeuge und Batteriehistorie wurden exportiert. Für ein Gesamtarchiv müssen die Tabellen serverseitig freigegeben werden."}
+        ];
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(warning), "Export-Hinweise");
+      }
+      XLSX.writeFile(wb,`Ford_Batterie_${omitted.length ? "TEILEXPORT" : "Gesamtarchiv"}_${localISODate()}.xlsx`);
+      if (omitted.length) {
+        alert("Excel-Teilexport erstellt. Nicht zugängliche Tabellen: " + omitted.join(", ") + ". Bitte den Reiter 'Export-Hinweise' lesen. Dies ist KEIN vollständiges Backup.");
+      }
     } catch(error) { console.error(error); alert("Excel-Export fehlgeschlagen: " + error.message); }
     finally { button.disabled = false; button.textContent = "📥 Excel exportieren"; }
   };
@@ -2084,14 +2116,7 @@
   function enableDrag(marker, car) {
     // On phones, a finger should scroll the map, never move a vehicle in Supabase.
     if (window.matchMedia('(pointer: coarse)').matches) return;
-    let startX = 0, startY = 0, moved = false, mode = "move";
-    let startingAngle = 0, pointerStartAngle = 0, currentAngle = 0;
-    const normalizeAngle = angle => ((Math.round(angle) % 360) + 360) % 360;
-    const pointerAngle = event => {
-      const rect = marker.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
-      return Math.atan2(event.clientY - cy, event.clientX - cx) * 180 / Math.PI;
-    };
+    let startX = 0, startY = 0, moved = false;
 
     marker.addEventListener("pointerdown", event => {
       if (!isAdmin() || placementMode || event.button !== 0) return;
@@ -2099,10 +2124,6 @@
       moved = false;
       startX = event.clientX;
       startY = event.clientY;
-      mode = "pending";
-      startingAngle = normalizeAngle(Number(car.rotation_deg || 0));
-      currentAngle = startingAngle;
-      pointerStartAngle = pointerAngle(event);
       dragInProgress = true;
       marker.setPointerCapture(event.pointerId);
       event.preventDefault();
@@ -2112,23 +2133,15 @@
       if (!marker.hasPointerCapture(event.pointerId)) return;
       const distance = Math.hypot(event.clientX - startX, event.clientY - startY);
       if (!moved && distance > 6) {
-        // Horizontal gesture rotates in place; vertical gesture moves the car.
-        mode = Math.abs(event.clientX - startX) >= Math.abs(event.clientY - startY) ? "rotate" : "move";
+        // Mausziehen bewegt Fahrzeuge nur; Drehung erfolgt per Tastatur ← / →.
         moved = true;
         dragging = true;
-        marker.classList.add(mode === "rotate" ? "rotating" : "dragging");
+        marker.classList.add("dragging");
       }
       if (!moved) return;
-      if (mode === "rotate") {
-        // 2 degrees per pixel, no need for a separate rotation handle.
-        currentAngle = normalizeAngle(startingAngle + (event.clientX - startX) * 2);
-        marker.querySelector(".carShape")?.style.setProperty("--rotation", `${currentAngle}deg`);
-        setStatus(`Fahrzeug drehen: ${currentAngle}°`);
-      } else {
-        const pos = getMapPercent(event.clientX, event.clientY);
-        marker.style.left = pos.x + "%";
-        marker.style.top = pos.y + "%";
-      }
+      const pos = getMapPercent(event.clientX, event.clientY);
+      marker.style.left = pos.x + "%";
+      marker.style.top = pos.y + "%";
     });
 
     marker.addEventListener("pointerup", async event => {
@@ -2136,21 +2149,20 @@
       marker.releasePointerCapture(event.pointerId);
       marker.classList.remove("dragging", "rotating");
       if (!moved) { dragInProgress = false; return; }
-      const rotating = mode === "rotate";
-      const pos = rotating ? null : getMapPercent(event.clientX, event.clientY);
-      const changes = rotating ? {rotation_deg: currentAngle} : {position_x:pos.x, position_y:pos.y};
+      const pos = getMapPercent(event.clientX, event.clientY);
+      const changes = {position_x: pos.x, position_y: pos.y};
       savingInProgress = true;
       try {
-        setStatus(rotating ? "Drehung wird gespeichert..." : "Position wird gespeichert...");
+        setStatus("Position wird gespeichert...");
         await apiRequest(`cars?id=eq.${car.id}`, {
           method:"PATCH", headers:{Prefer:"return=minimal"}, body:JSON.stringify(changes)
         });
         Object.assign(car, changes);
         lastCarsSnapshot = "";
-        setStatus(rotating ? "Drehung gespeichert." : "Position gespeichert.");
+        setStatus("Position gespeichert.");
       } catch (error) {
         console.error(error);
-        alert((rotating ? "Drehung" : "Position") + " konnte nicht gespeichert werden: " + error.message);
+        alert("Position konnte nicht gespeichert werden: " + error.message);
       } finally {
         dragInProgress = false;
         savingInProgress = false;
@@ -2219,7 +2231,9 @@
       car.mobile_url || "";
 
     const admin = isAdmin();
-    $("rotationControls").style.display = admin && (branchOf(car) === 1 || branchOf(car) === 8) ? "block" : "none";
+    const canRotateOnMap = admin && (branchOf(car) === 1 || branchOf(car) === 8);
+    $("rotationControls").style.display = "none";
+    $("rotationKeyboardHint").style.display = canRotateOnMap ? "block" : "none";
     $("rotationValue").textContent = `${Number(car.rotation_deg || 0)}°`;
 
     [
@@ -2277,6 +2291,17 @@
   $("rotateRight").onclick = () => rotateSelectedCar(15);
   $("rotateHalf").onclick = () => rotateSelectedCar(180);
   $("rotateReset").onclick = () => rotateSelectedCar(0, true);
+
+  document.addEventListener("keydown", event => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+    const target = event.target;
+    if (target instanceof Element && (target.closest("input, textarea, select, [contenteditable='true']") || target.closest("[role='textbox']"))) return;
+    if (!isAdmin() || !selectedCar || $("card").style.display !== "block") return;
+    if (branchOf(selectedCar) !== 1 && branchOf(selectedCar) !== 8) return;
+    event.preventDefault();
+    void rotateSelectedCar(event.key === "ArrowLeft" ? -15 : 15);
+  });
 
   /* СОХРАНЕНИЕ */
   $("saveCarButton").addEventListener(
