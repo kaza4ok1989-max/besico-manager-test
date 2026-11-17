@@ -5,6 +5,9 @@ import { RefreshCw, Search, MapPin, FileText, Plus, Trash2, GripVertical, Printe
 
 type Schein = { id: string; belegnummer: string | null; kennzeichen: string; lager: string; lagerplatz: string; daten: Record<string, unknown> | null; erstellt_am: string; besico_lager_id: string | null };
 type WarehouseInfo = { id: string; standort_id: string; name: string };
+type BereichTyp = 'Regal' | 'Reihe' | 'Bereich';
+type LagerBereich = { id: string; lager_id: string; name: string; typ: BereichTyp };
+type LagerPlatz = { id: string; bereich_id: string; ebene: string; platz_nummer: string };
 type LagerUebersichtProps = { view: 'Radsätze' | 'Lagerplan'; standortId: string; standortName: string };
 type Area = 'Zelt' | 'Lager';
 const btn: CSSProperties = { border: '1px solid #cbd5e1', background: '#fff', borderRadius: 8, padding: '9px 12px', cursor: 'pointer', color: '#12365a', fontWeight: 600 };
@@ -32,12 +35,31 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  const [reload, setReload] = useState(0);
+
+  // Separate database tables for the warehouse layout. No Glauchau legacy tables
+  // or reifenlager_scheine records are modified by this setup interface.
+  const [areas, setAreas] = useState<LagerBereich[]>([]);
+  const [places, setPlaces] = useState<LagerPlatz[]>([]);
+  const [selectedAreaId, setSelectedAreaId] = useState('');
+  const [newAreaName, setNewAreaName] = useState('');
+  const [newAreaType, setNewAreaType] = useState<BereichTyp>('Regal');
+  const [levelName, setLevelName] = useState('Unten');
+  const [firstNumber, setFirstNumber] = useState('1');
+  const [numberOfPlaces, setNumberOfPlaces] = useState('3');
+  const [structureLoading, setStructureLoading] = useState(false);
+  const [structureSaving, setStructureSaving] = useState(false);
+  const [structureError, setStructureError] = useState('');
+  const [structureReadFailed, setStructureReadFailed] = useState(false);
+  const [structureMessage, setStructureMessage] = useState('');
+  const [structureReload, setStructureReload] = useState(0);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError('');
+    setMessage('');
+    setBranchWarehouses([]);
+    setSelectedWarehouseId('');
     void (async () => {
       const { data, error: loadError } = await supabase.from('besico_lager')
         .select('id,standort_id,name')
@@ -45,8 +67,6 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
         .order('name');
       if (!active) return;
       if (loadError) {
-        setBranchWarehouses([]);
-        setSelectedWarehouseId('');
         setError('Lager konnten nicht geladen werden: ' + loadError.message);
       } else {
         const list = (data ?? []) as WarehouseInfo[];
@@ -56,16 +76,74 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       setLoading(false);
     })();
     return () => { active = false; };
-  }, [standortId, reload]);
+  }, [standortId]);
+
+  const availableWarehouses = branchWarehouses.filter(item => item.standort_id === standortId);
+  const selectedWarehouse = availableWarehouses.find(item => item.id === selectedWarehouseId);
+
+  useEffect(() => {
+    let active = true;
+    setAreas([]);
+    setPlaces([]);
+    setStructureMessage('');
+    setStructureError('');
+    setStructureReadFailed(false);
+    if (!selectedWarehouse) {
+      setStructureLoading(false);
+      return () => { active = false; };
+    }
+    setStructureLoading(true);
+    const warehouseId = selectedWarehouse.id;
+    void (async () => {
+      try {
+        const allAreas: LagerBereich[] = [];
+        // Supabase can cap a response at 1000 rows. Load pages explicitly.
+        for (let from = 0; ; from += 1000) {
+          const { data, error: readError } = await supabase.from('besico_lager_bereiche')
+            .select('id,lager_id,name,typ').eq('lager_id', warehouseId)
+            .order('name').order('id').range(from, from + 999);
+          if (readError) throw readError;
+          const batch = (data ?? []) as LagerBereich[];
+          allAreas.push(...batch);
+          if (batch.length < 1000) break;
+        }
+        const allPlaces: LagerPlatz[] = [];
+        // Query only area IDs from this warehouse. Keep IN requests compact.
+        for (let index = 0; index < allAreas.length; index += 25) {
+          const ids = allAreas.slice(index, index + 25).map(area => area.id);
+          for (let from = 0; ; from += 1000) {
+            const { data, error: readError } = await supabase.from('besico_lagerplaetze')
+              .select('id,bereich_id,ebene,platz_nummer').in('bereich_id', ids)
+              .order('id').range(from, from + 999);
+            if (readError) throw readError;
+            const batch = (data ?? []) as LagerPlatz[];
+            allPlaces.push(...batch);
+            if (batch.length < 1000) break;
+          }
+        }
+        if (!active) return;
+        setAreas(allAreas);
+        setPlaces(allPlaces);
+        setSelectedAreaId(previous => allAreas.some(area => area.id === previous) ? previous : (allAreas[0]?.id ?? ''));
+      } catch (cause) {
+        if (!active) return;
+        setStructureReadFailed(true);
+        setStructureError('Lagerstruktur konnte nicht geladen werden: ' + (cause instanceof Error ? cause.message : String(cause)));
+      } finally {
+        if (active) setStructureLoading(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [selectedWarehouse?.id, structureReload]);
 
   async function createWarehouse() {
     const name = newWarehouseName.trim().replace(/\s+/g, ' ');
-    if (loading || saving) return;
+    if (loading || saving || !standortId) return;
     if (!name || name.length > 60) {
       setError('Lagername: bitte 1 bis 60 Zeichen eingeben.');
       return;
     }
-    if (branchWarehouses.some(item => item.name.localeCompare(name, 'de', { sensitivity: 'base' }) === 0)) {
+    if (availableWarehouses.some(item => item.name.localeCompare(name, 'de', { sensitivity: 'base' }) === 0)) {
       setError('Ein Lager mit diesem Namen existiert bereits in dieser Filiale.');
       return;
     }
@@ -73,7 +151,6 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     setError('');
     setMessage('');
     try {
-      // The database guarantees unique (standort_id, name); no existing data are modified.
       const { data, error: insertError } = await supabase.from('besico_lager')
         .insert({ standort_id: standortId, name })
         .select('id,standort_id,name')
@@ -82,8 +159,9 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       const created = data as WarehouseInfo;
       setNewWarehouseName('');
       setMessage(`Lager „${created.name}“ wurde für ${standortName} angelegt.`);
+      // Make the new warehouse visible immediately and keep it selected.
+      setBranchWarehouses(previous => [...previous.filter(item => item.id !== created.id), created]);
       setSelectedWarehouseId(created.id);
-      setReload(value => value + 1);
     } catch (cause) {
       setError('Lager anlegen: ' + (cause instanceof Error ? cause.message : String(cause)));
     } finally {
@@ -91,7 +169,87 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     }
   }
 
-  const selectedWarehouse = branchWarehouses.find(item => item.id === selectedWarehouseId);
+  const selectedArea = areas.find(area => area.id === selectedAreaId && area.lager_id === selectedWarehouse?.id);
+  const selectedAreaPlaces = selectedArea ? places.filter(place => place.bereich_id === selectedArea.id) : [];
+  const layoutBusy = loading || saving || structureLoading || structureSaving || structureReadFailed;
+
+  async function createArea() {
+    if (layoutBusy || !selectedWarehouse) return;
+    const name = newAreaName.trim().replace(/\s+/g, ' ');
+    if (!name || name.length > 60) {
+      setStructureError('Name: bitte 1 bis 60 Zeichen eingeben.');
+      return;
+    }
+    if (areas.some(area => area.name.localeCompare(name, 'de', { sensitivity: 'base' }) === 0)) {
+      setStructureError('Dieser Name wird in diesem Lager bereits verwendet.');
+      return;
+    }
+    setStructureSaving(true);
+    setStructureError('');
+    setStructureMessage('');
+    try {
+      const { data, error: insertError } = await supabase.from('besico_lager_bereiche')
+        .insert({ lager_id: selectedWarehouse.id, name, typ: newAreaType })
+        .select('id,lager_id,name,typ').single();
+      if (insertError || !data) throw insertError ?? new Error('Bereich konnte nicht angelegt werden.');
+      const created = data as LagerBereich;
+      setNewAreaName('');
+      setAreas(previous => [...previous, created]);
+      setSelectedAreaId(created.id);
+      setStructureMessage(`${created.typ} „${created.name}“ im Lager „${selectedWarehouse.name}“ angelegt. Jetzt Ebenen und Plätze hinzufügen.`);
+    } catch (cause) {
+      setStructureError('Regal / Reihe anlegen: ' + (cause instanceof Error ? cause.message : String(cause)));
+    } finally {
+      setStructureSaving(false);
+    }
+  }
+
+  async function createPlaces() {
+    if (layoutBusy || !selectedWarehouse || !selectedArea) return;
+    const ebene = levelName.trim().replace(/\s+/g, ' ');
+    const first = Number(firstNumber);
+    const count = Number(numberOfPlaces);
+    if (!ebene || ebene.length > 60) {
+      setStructureError('Ebene: bitte 1 bis 60 Zeichen eingeben.');
+      return;
+    }
+    if (!Number.isSafeInteger(first) || first < 1 || first > 99999 ||
+        !Number.isSafeInteger(count) || count < 1 || count > 100 || first + count - 1 > 99999) {
+      setStructureError('Bitte eine gültige Startnummer (1–99999) und 1 bis 100 Plätze pro Vorgang eingeben.');
+      return;
+    }
+    const newPlaces = Array.from({ length: count }, (_, index) => ({
+      bereich_id: selectedArea.id,
+      ebene,
+      platz_nummer: String(first + index).padStart(2, '0'),
+    }));
+    if (newPlaces.some(next => selectedAreaPlaces.some(existing =>
+      existing.ebene.localeCompare(next.ebene, 'de', { sensitivity: 'base' }) === 0 &&
+      existing.platz_nummer === next.platz_nummer
+    ))) {
+      setStructureError('Mindestens ein Platz mit dieser Ebene und Nummer existiert bereits. Bitte andere Startnummer wählen.');
+      return;
+    }
+    setStructureSaving(true);
+    setStructureError('');
+    setStructureMessage('');
+    try {
+      // All requested places are inserted in one PostgreSQL statement.
+      // A UNIQUE violation rejects the whole statement; no existing slots are changed.
+      const { data, error: insertError } = await supabase.from('besico_lagerplaetze')
+        .insert(newPlaces).select('id,bereich_id,ebene,platz_nummer');
+      if (insertError || !data || data.length !== newPlaces.length) {
+        throw insertError ?? new Error('Es wurden nicht alle Plätze bestätigt. Bitte aktualisieren.');
+      }
+      setPlaces(previous => [...previous, ...(data as LagerPlatz[])]);
+      setFirstNumber(String(first + count));
+      setStructureMessage(`${count} Lagerplätze in ${selectedArea.typ} „${selectedArea.name}“, Ebene „${ebene}“, angelegt.`);
+    } catch (cause) {
+      setStructureError('Plätze anlegen: ' + (cause instanceof Error ? cause.message : String(cause)));
+    } finally {
+      setStructureSaving(false);
+    }
+  }
 
   return <section style={{ maxWidth: 1300 }}>
     <h1>Lagerplan · {standortName}</h1>
@@ -100,15 +258,15 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       <h2 style={{ marginTop: 0 }}>Lager auswählen</h2>
       {loading ? <p>Lager werden geladen...</p> : <label style={{ display: 'grid', gap: 6, maxWidth: 400 }}>
         Lager in {standortName}
-        <select value={selectedWarehouseId} onChange={event => setSelectedWarehouseId(event.target.value)} disabled={!branchWarehouses.length || saving} style={btn}>
-          {!branchWarehouses.length && <option value="">Noch kein Lager vorhanden</option>}
-          {branchWarehouses.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+        <select value={selectedWarehouse?.id ?? ''} onChange={event => setSelectedWarehouseId(event.target.value)} disabled={!availableWarehouses.length || saving || structureSaving} style={btn}>
+          {!availableWarehouses.length && <option value="">Noch kein Lager vorhanden</option>}
+          {availableWarehouses.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
         </select>
       </label>}
-      {!loading && !branchWarehouses.length && !error && <p>Für diese Filiale wurde noch kein Lager angelegt.</p>}
+      {!loading && !availableWarehouses.length && !error && <p>Für diese Filiale wurde noch kein Lager angelegt.</p>}
       {selectedWarehouse && <p style={{ color: '#475569', marginBottom: 0 }}>Ausgewähltes Lager: <strong>{selectedWarehouse.name}</strong></p>}
     </div>
-    <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16 }}>
+    <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Neues Lager anlegen</h2>
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'end' }}>
         <label style={{ display: 'grid', gap: 6, flex: '1 1 230px', maxWidth: 400 }}>
@@ -121,11 +279,79 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       </div>
       {error && <p role="alert" style={{ color: '#b91c1c' }}>{error}</p>}
       {message && <p role="status" style={{ color: '#166534' }}>{message}</p>}
-      <p style={{ fontSize: 13, color: '#64748b', marginBottom: 0 }}>Im nächsten Schritt kommen Regale, Reihen, Ebenen und Lagerplätze dazu. Einlagern und Excel-Import sind für neue Lager noch gesperrt, damit keine Radsätze falsch zugeordnet werden.</p>
     </div>
+    {selectedWarehouse && <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <h2 style={{ marginTop: 0 }}>Lagerstruktur · {selectedWarehouse.name}</h2>
+      <p style={{ color: '#64748b', fontSize: 13 }}>Regale, Reihen oder Bereiche anlegen. Danach Ebenen und Lagerplätze selbst festlegen. Es werden nur Daten dieses Lagers angezeigt.</p>
+      {structureLoading && <p>Lagerstruktur wird geladen...</p>}
+      {structureError && <p role="alert" style={{ color: '#b91c1c', fontWeight: 600 }}>{structureError} <button type="button" style={btn} onClick={() => { setStructureError(''); setStructureReload(n => n + 1); }}>Aktualisieren</button></p>}
+      {structureMessage && <p role="status" style={{ color: '#166534' }}>{structureMessage}</p>}
+      {!structureLoading && <>
+        <h3>Neues Regal / neue Reihe</h3>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'end', gap: 10, marginBottom: 16 }}>
+          <label style={{ display: 'grid', gap: 6 }}>Typ
+            <select value={newAreaType} onChange={event => setNewAreaType(event.target.value as BereichTyp)} style={btn} disabled={layoutBusy}>
+              <option value="Regal">Regal</option><option value="Reihe">Reihe</option><option value="Bereich">Bereich</option>
+            </select>
+          </label>
+          <label style={{ display: 'grid', gap: 6, flex: '1 1 180px', maxWidth: 320 }}>Name
+            <input value={newAreaName} onChange={event => setNewAreaName(event.target.value)} maxLength={60} placeholder="z. B. Regal A, Reihe 1" style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8 }} disabled={layoutBusy} />
+          </label>
+          <button type="button" style={{ ...btn, background: '#12365a', color: '#fff' }} onClick={() => void createArea()} disabled={layoutBusy || !newAreaName.trim()}>
+            <Plus size={15} style={{ verticalAlign: 'middle' }} /> Regal / Reihe anlegen
+          </button>
+        </div>
+        <h3>Ebenen und Lagerplätze hinzufügen</h3>
+        {areas.length === 0 ? <p>Bitte zuerst ein Regal, eine Reihe oder einen Bereich anlegen.</p> : <>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'end', marginBottom: 12 }}>
+            <label style={{ display: 'grid', gap: 6, flex: '1 1 200px', maxWidth: 320 }}>Regal / Reihe
+              <select value={selectedArea?.id ?? ''} onChange={event => setSelectedAreaId(event.target.value)} disabled={layoutBusy} style={btn}>
+                {areas.map(area => <option key={area.id} value={area.id}>{area.typ} · {area.name}</option>)}
+              </select>
+            </label>
+            <label style={{ display: 'grid', gap: 6, flex: '1 1 145px', maxWidth: 230 }}>Ebene
+              <input value={levelName} onChange={event => setLevelName(event.target.value)} maxLength={60} placeholder="z. B. Unten, Oben, 4" disabled={layoutBusy} style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8 }} />
+            </label>
+            <label style={{ display: 'grid', gap: 6, width: 135 }}>Startnummer
+              <input type="number" min={1} max={99999} step={1} value={firstNumber} onChange={event => setFirstNumber(event.target.value)} disabled={layoutBusy} style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8, width: '100%', boxSizing: 'border-box' }} />
+            </label>
+            <label style={{ display: 'grid', gap: 6, width: 140 }}>Anzahl Plätze
+              <input type="number" min={1} max={100} step={1} value={numberOfPlaces} onChange={event => setNumberOfPlaces(event.target.value)} disabled={layoutBusy} style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8, width: '100%', boxSizing: 'border-box' }} />
+            </label>
+            <button type="button" style={{ ...btn, background: '#12365a', color: '#fff' }} disabled={layoutBusy || !selectedArea || !levelName.trim()} onClick={() => void createPlaces()}>
+              <Plus size={15} style={{ verticalAlign: 'middle' }} /> Plätze anlegen
+            </button>
+          </div>
+          <p style={{ fontSize: 12, color: '#64748b' }}>Beispiel: Ebene „Unten“, Startnummer 1, Anzahl 3 ergibt die Plätze 01, 02, 03. Für weitere Ebenen einfach den Ebenennamen ändern. Pro Vorgang sind bis zu 100 Plätze möglich.</p>
+        </>}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <h3>Übersicht der Lagerplätze</h3>
+          <button type="button" style={btn} disabled={structureSaving} onClick={() => setStructureReload(n => n + 1)}><RefreshCw size={15} style={{ verticalAlign: 'middle' }} /> Aktualisieren</button>
+        </div>
+        {areas.length === 0 && <p>In diesem Lager wurden noch keine Regale oder Reihen angelegt.</p>}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 260px), 1fr))', gap: 12 }}>
+          {areas.map(area => {
+            const areaPlaces = places.filter(place => place.bereich_id === area.id);
+            const levels = [...new Set(areaPlaces.map(place => place.ebene))].sort((a, b) => a.localeCompare(b, 'de', { numeric: true }));
+            return <div key={area.id} style={{ border: '1px solid #dbe3ee', borderRadius: 10, padding: 12, background: '#f8fafc' }}>
+              <strong>{area.typ} {area.name}</strong>
+              <p style={{ margin: '6px 0', fontSize: 12, color: '#64748b' }}>{areaPlaces.length} Lagerplätze</p>
+              {levels.length === 0 && <p style={{ fontSize: 12, color: '#64748b' }}>Noch keine Ebenen oder Plätze angelegt.</p>}
+              {levels.map(level => <div key={level} style={{ marginTop: 12 }}>
+                <strong style={{ fontSize: 13 }}>Ebene: {level}</strong>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 7 }}>
+                  {areaPlaces.filter(place => place.ebene === level).sort((a, b) => a.platz_nummer.localeCompare(b.platz_nummer, 'de', { numeric: true }))
+                    .map(place => <span key={place.id} title={`${area.typ} ${area.name} · ${level} · Platz ${place.platz_nummer}`} style={{ background: '#e2e8f0', border: '1px solid #cbd5e1', borderRadius: 7, padding: '7px 9px', fontSize: 12, fontWeight: 700 }}>{place.platz_nummer}</span>)}
+                </div>
+              </div>)}
+            </div>;
+          })}
+        </div>
+      </>}
+    </div>}
+    <p style={{ color: '#64748b', fontSize: 13 }}>Radsätze einlagern, verschieben und Excel-Import für neue Lager bleiben gesperrt, bis die sichere Zuordnung je Lager fertiggestellt und geprüft ist. Die Glauchau-Daten werden nicht geändert.</p>
   </section>;
 }
-
 
 export default function LagerUebersicht({ view, standortId, standortName }: LagerUebersichtProps) {
   const [rows, setRows] = useState<Schein[]>([]);
