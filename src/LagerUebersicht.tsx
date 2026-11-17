@@ -13,7 +13,7 @@ type LagerUebersichtProps = { view: 'Radsätze' | 'Lagerplan'; standortId: strin
 type Area = 'Zelt' | 'Lager';
 const btn: CSSProperties = { border: '1px solid #cbd5e1', background: '#fff', borderRadius: 8, padding: '9px 12px', cursor: 'pointer', color: '#12365a', fontWeight: 600 };
 const norm = (s: string | null | undefined) => (s ?? '').trim().toUpperCase().replace(/\s+/g, '');
-const searchNorm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+const searchNorm = (value: unknown): string => String(value ?? '').normalize('NFKD').toLocaleLowerCase('de-DE').replace(/ß/g, 'ss').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]/gu, '');
 const field = (r: Schein, key: string) => String(r.daten?.[key] ?? '').trim();
 const qrUrl = (id: string) => `${window.location.origin}${import.meta.env.BASE_URL}?qr=${encodeURIComponent(id)}`;
 const keyOf = (area: string, place: string) => `${norm(area)}::${norm(place)}`;
@@ -56,6 +56,11 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const [selectedPlanPlaceId, setSelectedPlanPlaceId] = useState('');
   const [branchPrintArea, setBranchPrintArea] = useState('all');
   const [branchPrintFree, setBranchPrintFree] = useState(true);
+  const [quickBranchOpen, setQuickBranchOpen] = useState(false);
+  const [quickBranchPlate, setQuickBranchPlate] = useState('');
+  const [quickBranchPlaceId, setQuickBranchPlaceId] = useState('');
+  const [quickBranchNote, setQuickBranchNote] = useState('');
+  const [quickBranchCreatedId, setQuickBranchCreatedId] = useState('');
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -114,6 +119,7 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const selectedWarehouse = availableWarehouses.find(item => item.id === selectedWarehouseId);
   useEffect(() => {
     setAssignPlaceId(''); setDropHoverPlaceId(null); setSelectedPlanPlaceId(''); setBranchPrintArea('all');
+    setQuickBranchPlaceId(''); setQuickBranchCreatedId('');
   }, [selectedWarehouseId]);
   useEffect(() => {
     if (!assignStockId) return;
@@ -169,13 +175,22 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const incomingCount = incomingWarehouse
     ? visibleBranchStock.filter(item => item.besico_lager_id === incomingWarehouse.id).length : 0;
   const selectedWarehouseCount = visibleBranchStock.filter(item => item.besico_lager_id === selectedWarehouseId).length;
+  const hideEmptyIncoming = !!incomingWarehouse && !branchStockLoading && !branchStockError &&
+    incomingCount === 0 && availableWarehouses.some(item => item.id !== incomingWarehouse.id);
+  useEffect(() => {
+    if (!hideEmptyIncoming || selectedWarehouseId !== incomingWarehouse?.id) return;
+    const nextWarehouse = availableWarehouses.find(item => item.id !== incomingWarehouse?.id);
+    if (nextWarehouse) setSelectedWarehouseId(nextWarehouse.id);
+  }, [hideEmptyIncoming, selectedWarehouseId, incomingWarehouse?.id, availableWarehouses]);
   const stockTerm = searchNorm(branchStockQuery);
   const filteredBranchStock = visibleBranchStock.filter(item => {
     if (!stockTerm) return true;
     const warehouseName = availableWarehouses.find(warehouse => warehouse.id === item.besico_lager_id)?.name ?? '';
-    const values = [item.kennzeichen, item.belegnummer, item.lagerplatz, warehouseName,
+    const values = [item.kennzeichen, item.belegnummer, item.lagerplatz, warehouseName, standortName,
       ...Object.values(item.daten ?? {}).filter(value => typeof value === 'string' || typeof value === 'number')];
-    return searchNorm(values.join(' ')).includes(stockTerm);
+    const combined = searchNorm(values.join(' '));
+    return combined.includes(stockTerm) || branchStockQuery.trim().split(/\s+/).every(word =>
+      combined.includes(searchNorm(word)));
   }).sort((a, b) => {
     // Show unassigned incoming stock first; keep the remainder in date order.
     const aIncoming = a.besico_lager_id === incomingWarehouse?.id ? 0 : 1;
@@ -309,6 +324,54 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const freeNewSlots = planIsVerified && physicalWarehouseSelected
     ? newWarehouseSlots.filter(slot => stockForPlace(slot.label).length === 0) : [];
   const assignStock = visibleBranchStock.find(item => item.id === assignStockId);
+
+  async function quickAddBranch() {
+    const plate = quickBranchPlate.trim().replace(/\s+/g, ' ').toUpperCase();
+    if (stockWorking || layoutBusy) return;
+    if (!plate || plate.length > 32) { setStockError('Kennzeichen: bitte 1 bis 32 Zeichen eingeben.'); return; }
+    if (!selectedWarehouse || !physicalWarehouseSelected || !planIsVerified) {
+      setStockError('Bitte zuerst ein echtes Lager mit geprüften freien Lagerplätzen auswählen.'); return;
+    }
+    const slot = freeNewSlots.find(item => item.place.id === quickBranchPlaceId);
+    if (!slot) { setStockError('Bitte einen freien Lagerplatz auswählen.'); return; }
+    if (!window.confirm(`Schnellaufnahme anlegen?\n\nKennzeichen: ${plate}\nFiliale: ${standortName}\nLager: ${selectedWarehouse.name}\nLagerplatz: ${slot.label}`)) return;
+    setStockWorking(true); setStockError(''); setStockMessage(''); setQuickBranchCreatedId('');
+    try {
+      const [warehouseCheck, areaCheck, placeCheck, existingAtPlace, duplicatePlate] = await Promise.all([
+        supabase.from('besico_lager').select('id').eq('id', selectedWarehouse.id).eq('standort_id', standortId).single(),
+        supabase.from('besico_lager_bereiche').select('id').eq('id', slot.area.id).eq('lager_id', selectedWarehouse.id).single(),
+        supabase.from('besico_lagerplaetze').select('id').eq('id', slot.place.id).eq('bereich_id', slot.area.id).single(),
+        supabase.from('reifenlager_scheine').select('id,lagerplatz').eq('besico_lager_id', selectedWarehouse.id),
+        supabase.from('reifenlager_scheine').select('id,kennzeichen').in('besico_lager_id', availableWarehouses.map(item => item.id)),
+      ]);
+      if (warehouseCheck.error || !warehouseCheck.data || areaCheck.error || !areaCheck.data || placeCheck.error || !placeCheck.data) {
+        throw new Error('Lagerstruktur wurde geändert. Bitte aktualisieren.');
+      }
+      if (existingAtPlace.error || duplicatePlate.error) throw existingAtPlace.error ?? duplicatePlate.error;
+      if ((existingAtPlace.data ?? []).some(item => norm(item.lagerplatz) === norm(slot.label))) {
+        throw new Error('Der Lagerplatz ist inzwischen belegt. Bitte aktualisieren.');
+      }
+      const dupes = (duplicatePlate.data ?? []).filter(item => searchNorm(item.kennzeichen) === searchNorm(plate));
+      if (dupes.length && !window.confirm(`Kennzeichen ${plate} ist bereits ${dupes.length}× in ${standortName} vorhanden. Trotzdem zusätzlich anlegen?`)) return;
+      const receipt = `SCHNELL-${crypto.randomUUID().slice(0, 12).toUpperCase()}`;
+      const { data: created, error: saveError } = await supabase.from('reifenlager_scheine').insert({
+        belegnummer: receipt, kennzeichen: plate, lager: '', lagerplatz: slot.label,
+        besico_lager_id: selectedWarehouse.id,
+        daten: { belegnummer: receipt, kennzeichen: plate, schnellaufnahme: true,
+          status: 'Unvollständig', bemerkung: quickBranchNote.trim(),
+          import_standort_name: standortName, import_lager_name: selectedWarehouse.name,
+          datum: new Date().toISOString().slice(0, 10) },
+      }).select('id').single();
+      if (saveError || !created) throw saveError ?? new Error('Speichern fehlgeschlagen.');
+      setQuickBranchCreatedId(created.id);
+      setQuickBranchPlate(''); setQuickBranchNote(''); setQuickBranchPlaceId('');
+      setStockMessage(`${plate} → ${selectedWarehouse.name} / ${slot.label} als Schnellaufnahme gespeichert.`);
+      setBranchStockRefresh(value => value + 1);
+      setStructureReload(value => value + 1);
+    } catch (cause) {
+      setStockError('Schnellaufnahme: ' + (cause instanceof Error ? cause.message : String(cause)));
+    } finally { setStockWorking(false); }
+  }
 
   async function moveBranchStock(scheinId: string, placeId: string) {
     if (stockWorking || layoutBusy || !planIsVerified || !physicalWarehouseSelected || !selectedWarehouse) return;
@@ -778,7 +841,7 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Lager auswählen</h2>
       {loading ? <p>Lager werden geladen...</p> : <div role="group" aria-label={`Lager in ${standortName}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-        {availableWarehouses.map(item => <button type="button" key={item.id} disabled={saving || structureSaving || stockWorking}
+        {availableWarehouses.filter(item => !hideEmptyIncoming || item.id !== incomingWarehouse?.id).map(item => <button type="button" key={item.id} disabled={saving || structureSaving || stockWorking}
           aria-pressed={selectedWarehouseId === item.id}
           onClick={() => setSelectedWarehouseId(item.id)}
           style={{ ...btn, background: selectedWarehouseId === item.id ? '#12365a' : '#fff',
@@ -835,6 +898,39 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       </div>
     </div>}
 
+    <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <button type="button" style={{ ...btn, display: 'inline-flex', alignItems: 'center', gap: 7,
+        background: quickBranchOpen ? '#e2e8f0' : '#12365a', color: quickBranchOpen ? '#12365a' : '#fff' }}
+        onClick={() => setQuickBranchOpen(value => !value)}><ClipboardPlus size={18} /> + Schnellaufnahme</button>
+      {quickBranchOpen && <div style={{ marginTop: 14 }}>
+        <h2 style={{ margin: '0 0 8px' }}>Radsatz schnell erfassen</h2>
+        <p style={{ fontSize: 13, color: '#64748b' }}>Neuer Radsatz in {standortName} · {selectedWarehouse?.name || 'Bitte Lager wählen'}. Erst Kennzeichen und freien Lagerplatz prüfen.</p>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'end' }}>
+          <label style={{ display: 'grid', gap: 5, fontSize: 13, fontWeight: 700 }}>Kennzeichen *
+            <input value={quickBranchPlate} maxLength={32} onChange={event => { setQuickBranchPlate(event.target.value); setQuickBranchCreatedId(''); }}
+              placeholder="z. B. GC-S 140" style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8 }} />
+          </label>
+          <label style={{ display: 'grid', gap: 5, fontSize: 13, fontWeight: 700 }}>Freier Lagerplatz *
+            <select value={quickBranchPlaceId} onChange={event => setQuickBranchPlaceId(event.target.value)}
+              disabled={!planIsVerified || !physicalWarehouseSelected || stockWorking}
+              style={{ ...btn, minWidth: 205, maxWidth: '100%' }}>
+              <option value="">Bitte auswählen</option>
+              {freeNewSlots.map(slot => <option key={slot.place.id} value={slot.place.id}>{slot.label}</option>)}
+            </select>
+          </label>
+          <label style={{ display: 'grid', gap: 5, fontSize: 13, fontWeight: 700 }}>Bemerkung (optional)
+            <input value={quickBranchNote} maxLength={500} onChange={event => setQuickBranchNote(event.target.value)}
+              placeholder="z. B. 4 Winterräder" style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8 }} />
+          </label>
+          <button type="button" style={{ ...btn, background: '#166534', color: '#fff' }}
+            disabled={stockWorking || !planIsVerified || !physicalWarehouseSelected || !quickBranchPlate.trim() || !quickBranchPlaceId}
+            onClick={() => void quickAddBranch()}>Speichern</button>
+        </div>
+        {!planIsVerified && <p style={{ color: '#92400e', fontSize: 12 }}>Nur nach Prüfung der Platzbelegung verfügbar.</p>}
+        {quickBranchCreatedId && <p style={{ color: '#166534', fontWeight: 700 }}>Gespeichert! <a href={qrUrl(quickBranchCreatedId)}>Schein / QR öffnen</a></p>}
+        <p style={{ color: '#64748b', fontSize: 12 }}>Schnellaufnahme wird als „Unvollständig“ markiert. Der Kundeneinlagerungsschein muss später ergänzt werden.</p>
+      </div>}
+    </div>
     <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ margin: '0 0 12px', display: 'flex', gap: 8, alignItems: 'center' }}><Printer size={20} /> Lagerliste drucken</h2>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'end' }}>
@@ -1007,8 +1103,8 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     <div id="filiale-radsaetze" style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Radsätze — unten · {standortName}</h2>
       <p style={{ color: '#475569', fontSize: 13 }}>
-        Excel-Importe liegen zunächst im Lager <strong>Wareneingang (Excel)</strong>, ohne festen Lagerplatz.
-        Hier sind alle Radsätze dieser Filiale sichtbar. Lager oben auswählen, mit „Platz zuweisen“ einen freien Platz wählen oder eine Karte nach oben auf eine grüne Zelle ziehen.
+        Hier sind alle Radsätze dieser Filiale sichtbar, auch ohne festen Lagerplatz.
+        Lager oben auswählen, mit „Platz zuweisen“ einen freien Platz wählen oder eine Karte nach oben auf eine grüne Zelle ziehen.
       </p>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
         <strong>Gesamt: {branchStockLoading ? '…' : visibleBranchStock.length}</strong>
@@ -1072,7 +1168,7 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
         </p>}
       </>}
     </div>
-    <p style={{ color: '#64748b', fontSize: 13 }}>Excel-Importe werden zuerst im Wareneingang gespeichert. Radsätze können anschließend in einen ausgewählten Lagerplatz verschoben werden. Die Glauchau-Daten bleiben unverändert.</p>
+    <p style={{ color: '#64748b', fontSize: 13 }}>Beim Excel-Import werden neue Radsätze direkt dem gewählten Lager zugeordnet, zunächst ohne Lagerplatz. Die bestehenden Glauchau-Daten bleiben unverändert.</p>
   </section>;
 }
 
@@ -1198,7 +1294,7 @@ export default function LagerUebersicht({ view, standortId, standortName }: Lage
     const values = [r.kennzeichen, r.belegnummer, r.lager, r.lagerplatz, ...Object.values(r.daten ?? {}).filter(v => typeof v === 'string')];
     const words = query.trim().split(/\s+/).filter(Boolean);
     const combined = searchNorm(values.join(' '));
-    if (!words.every(word => combined.includes(searchNorm(word)))) return false;
+    if (!combined.includes(searchNorm(query)) && !words.every(word => combined.includes(searchNorm(word)))) return false;
     if (excelArea !== 'all' && oldArea(r) !== excelArea) return false;
     if (excelRow !== 'all' && oldLocation(r) !== excelRow) return false;
     if (onlyUnassigned && r.lagerplatz?.trim()) return false;

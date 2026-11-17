@@ -7,7 +7,8 @@ import { supabase } from './supabase';
 type CellRow = Record<string, unknown>;
 type Kind = 'Fahrzeuge' | 'Radsaetze';
 type Standort = { id: string; name: string };
-const IMPORT_LAGER_NAME = 'Wareneingang (Excel)';
+type Warehouse = { id: string; standort_id: string; name: string };
+const isIncoming = (name: string) => name.trim().toLocaleLowerCase('de-DE') === 'wareneingang (excel)';
 
 const columns: Record<Kind, string[]> = {
   Fahrzeuge: ['kennzeichen', 'vin', 'marke', 'modell', 'kunde_name', 'kunde_telefon', 'bemerkung'],
@@ -16,7 +17,7 @@ const columns: Record<Kind, string[]> = {
 const style: CSSProperties = { background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 18, marginBottom: 16 };
 const button: CSSProperties = { border: '1px solid #12365a', borderRadius: 8, padding: '10px 14px', background: '#12365a', color: '#fff', cursor: 'pointer', fontWeight: 700 };
 const text = (v: unknown) => String(v ?? '').trim();
-const normalize = (v: unknown) => text(v).toUpperCase().replace(/[^A-Z0-9]/g, '');
+const normalize = (value: unknown): string => String(value ?? '').normalize('NFKD').toLocaleLowerCase('de-DE').replace(/ß/g, 'ss').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]/gu, '');
 const identity = (r: CellRow) => {
   const d = (r.daten && typeof r.daten === 'object' && !Array.isArray(r.daten) ? r.daten : r) as CellRow;
   const plate = normalize(r.kennzeichen);
@@ -69,13 +70,17 @@ export default function ExcelImportExport() {
   const [reviewDecisions, setReviewDecisions] = useState<Record<number, ReviewDecision>>({});
   const [previewFilter, setPreviewFilter] = useState<PreviewFilter>('Alle');
   const [previewSearch, setPreviewSearch] = useState('');
-  // City is mandatory for tyre imports. A separate per-city incoming warehouse
-  // keeps the sets attributable to their branch until staff assign storage.
+  // City and physical warehouse are mandatory. Places are assigned later.
   const [standorte, setStandorte] = useState<Standort[]>([]);
   const [standortId, setStandortId] = useState('');
   const [standortLoading, setStandortLoading] = useState(true);
   const [standortError, setStandortError] = useState('');
   const [previewStandortId, setPreviewStandortId] = useState('');
+  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+  const [warehouseId, setWarehouseId] = useState('');
+  const [warehouseLoading, setWarehouseLoading] = useState(false);
+  const [warehouseError, setWarehouseError] = useState('');
+  const [previewWarehouseId, setPreviewWarehouseId] = useState('');
 
   useEffect(() => {
     let live = true;
@@ -98,41 +103,41 @@ export default function ExcelImportExport() {
     return () => { live = false; };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    setWarehouses([]); setWarehouseId(''); setWarehouseError('');
+    if (!standortId) { setWarehouseLoading(false); return () => { active = false; }; }
+    setWarehouseLoading(true);
+    void (async () => {
+      const { data, error } = await supabase.from('besico_lager')
+        .select('id,standort_id,name').eq('standort_id', standortId).order('name');
+      if (!active) return;
+      if (error) setWarehouseError('Lager konnten nicht geladen werden: ' + error.message);
+      else setWarehouses(((data || []) as Warehouse[]).filter(item => !isIncoming(item.name)));
+      setWarehouseLoading(false);
+    })();
+    return () => { active = false; };
+  }, [standortId]);
+
   function resetImportPreview() {
     setPreview([]); setChecks([]); setReviewDecisions({});
     setPreviewFilter('Alle'); setPreviewSearch(''); setStatus('');
     setErrors([]); setFilename(''); setLegacyImport(false);
-    setPreviewStandortId('');
+    setPreviewStandortId(''); setPreviewWarehouseId('');
   }
 
-  // Read the target city and the warehouse back from Supabase before writing.
-  // There is no standort_id on reifenlager_scheine: its besico_lager_id must
-  // point to an actual warehouse belonging to the selected city.
-  async function ensureIncomingWarehouse(cityId: string): Promise<{ id: string; cityName: string }> {
-    const { data: city, error: cityError } = await supabase.from('besico_standorte')
-      .select('id,name').eq('id', cityId).single();
-    if (cityError || !city) throw cityError ?? new Error('Filiale nicht gefunden.');
-    const findWarehouse = () => supabase.from('besico_lager')
-      .select('id,standort_id,name')
-      .eq('standort_id', cityId).eq('name', IMPORT_LAGER_NAME).limit(1);
-    const found = await findWarehouse();
-    if (found.error) throw found.error;
-    if (found.data?.[0]) return { id: found.data[0].id, cityName: city.name };
-
-    const created = await supabase.from('besico_lager')
-      .insert({ standort_id: cityId, name: IMPORT_LAGER_NAME })
-      .select('id,standort_id,name').single();
-    if (!created.error && created.data) return { id: created.data.id, cityName: city.name };
-
-    // Another user may have created it just now (unique on standort_id,name).
-    if (created.error?.code === '23505') {
-      const retry = await findWarehouse();
-      if (retry.error) throw retry.error;
-      if (retry.data?.[0]) return { id: retry.data[0].id, cityName: city.name };
-    }
-    throw created.error ?? new Error('Wareneingang konnte nicht angelegt werden.');
+  // Verify the selected warehouse still belongs to the selected city.
+  // This never creates a warehouse or changes existing wheel records.
+  async function verifyTargetWarehouse(cityId: string, targetId: string): Promise<{ id: string; cityName: string; warehouseName: string }> {
+    const [city, warehouse] = await Promise.all([
+      supabase.from('besico_standorte').select('id,name').eq('id', cityId).single(),
+      supabase.from('besico_lager').select('id,standort_id,name').eq('id', targetId).eq('standort_id', cityId).single(),
+    ]);
+    if (city.error || !city.data) throw city.error ?? new Error('Filiale nicht gefunden.');
+    if (warehouse.error || !warehouse.data) throw warehouse.error ?? new Error('Lager gehört nicht zu dieser Filiale.');
+    if (isIncoming(warehouse.data.name)) throw new Error('Bitte ein echtes Lager statt Wareneingang wählen.');
+    return { id: warehouse.data.id, cityName: city.data.name, warehouseName: warehouse.data.name };
   }
-
 
   async function fetchData() {
     const [vehicles, receipts] = await Promise.all([
@@ -269,8 +274,8 @@ export default function ExcelImportExport() {
     resetImportPreview();
     setFilename(file?.name || '');
     if (!file) return;
-    if (kind === 'Radsaetze' && (!standortId || !standorte.some(city => city.id === standortId))) {
-      setErrors(['Bitte zuerst die Zielfiliale auswählen. Es wurden keine Daten importiert.']);
+    if (kind === 'Radsaetze' && (!standortId || !standorte.some(city => city.id === standortId) || !warehouseId || !warehouses.some(item => item.id === warehouseId))) {
+      setErrors(['Bitte zuerst die Zielfiliale und das Ziellager auswählen. Es wurden keine Daten importiert.']);
       event.target.value = '';
       return;
     }
@@ -291,6 +296,7 @@ export default function ExcelImportExport() {
       const evaluated = await classifyRows(rows, kind);
       setChecks(evaluated);
       setPreviewStandortId(kind === 'Radsaetze' ? standortId : '');
+      setPreviewWarehouseId(kind === 'Radsaetze' ? warehouseId : '');
       setPreview(rows);
       setStatus(`${rows.length} Zeilen geprüft. Neu: ${evaluated.filter(x => x.state === 'Neu').length}; vorhanden: ${evaluated.filter(x => x.state === 'Bereits vorhanden').length}; manuell prüfen: ${evaluated.filter(x => x.state === 'Prüfen').length}. Noch nichts gespeichert.`);
     } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); }
@@ -358,8 +364,9 @@ export default function ExcelImportExport() {
     if (!preview.length || working || checking) return;
     const cityId = standortId;
     const chosenCity = standorte.find(city => city.id === cityId);
-    if (kind === 'Radsaetze' && (!chosenCity || previewStandortId !== cityId)) {
-      setErrors(['Zielfiliale fehlt oder wurde seit der Dateiprüfung geändert. Bitte Datei erneut auswählen.']);
+    const selectedWarehouse = warehouses.find(item => item.id === warehouseId && item.standort_id === cityId);
+    if (kind === 'Radsaetze' && (!chosenCity || !selectedWarehouse || previewStandortId !== cityId || previewWarehouseId !== warehouseId)) {
+      setErrors(['Zielfiliale oder Ziellager fehlt bzw. wurde seit der Dateiprüfung geändert. Bitte Datei erneut auswählen.']);
       return;
     }
     setWorking(true); setErrors([]); setStatus('Datenbank wird erneut geprüft...');
@@ -367,6 +374,7 @@ export default function ExcelImportExport() {
     let added = 0, skipped = 0, review = 0;
     let targetWarehouseId = '';
     let targetCityName = '';
+    let targetWarehouseName = '';
     try {
       // Always recheck immediately before writing, not only when the file was selected.
       const existing = await loadExisting(kind);
@@ -390,19 +398,18 @@ export default function ExcelImportExport() {
          return;
        }
        const destinationInfo = kind === 'Radsaetze'
-         ? `\n\nZielfiliale: ${chosenCity?.name || 'NICHT GEWÄHLT'}\nZwischenlager: ${IMPORT_LAGER_NAME}\nKeine festen Lagerplätze zugewiesen.`
+         ? `\n\nZielfiliale: ${chosenCity?.name || 'NICHT GEWÄHLT'}\nZiellager: ${selectedWarehouse?.name || 'NICHT GEWÄHLT'}\nKeine festen Lagerplätze zugewiesen.`
          : '';
        if (!window.confirm(`${newCount} freigegebene Einträge importieren?\n${skippedCount} überspringen\n${reviewCount} unentschiedene Einträge NICHT importieren\nLagerplätze werden nicht übernommen.${destinationInfo}`)) {
          setStatus('Import abgebrochen. Nichts gespeichert.');
          return;
        }
-       // Create/reuse a dedicated incoming warehouse only after confirmation.
-       // Newly imported sets have no physical Lagerplatz, but already belong to
-       // the selected city through besico_lager_id.
+       // Double-check the destination before inserting. Never create Wareneingang.
        if (kind === 'Radsaetze') {
-         const target = await ensureIncomingWarehouse(cityId);
+         const target = await verifyTargetWarehouse(cityId, warehouseId);
          targetWarehouseId = target.id;
          targetCityName = target.cityName;
+         targetWarehouseName = target.warehouseName;
        }
       const accepted: CellRow[] = [];
       for (let i = 0; i < preview.length; i++) {
@@ -424,11 +431,12 @@ export default function ExcelImportExport() {
           const number = text(row.belegnummer), plate = text(row.kennzeichen).toUpperCase();
           if (!targetWarehouseId) throw new Error('Ziellager wurde nicht bestätigt. Import gestoppt.');
           const payload = {
-            belegnummer: number, kennzeichen: plate, lager: '', lagerplatz: '',
+            belegnummer: number, kennzeichen: plate, lager: targetCityName === 'Glauchau' && (targetWarehouseName === 'Zelt' || targetWarehouseName === 'Lager') ? targetWarehouseName : '', lagerplatz: '',
             besico_lager_id: targetWarehouseId,
             daten: {
             import_standort_id: cityId, import_standort_name: targetCityName,
-            import_eingang: true, import_zeitpunkt: new Date().toISOString(),
+            import_lager_id: targetWarehouseId, import_lager_name: targetWarehouseName,
+            import_zeitpunkt: new Date().toISOString(),
             kundenname: text(row.kundenname), fahrzeug: text(row.fahrzeug), saison: text(row.saison),
             reifengroesse: text(row.reifengroesse), reifenbezeichnung: text(row.reifenbezeichnung),
             fahrzeugstandort: text(row.fahrzeugstandort), bemerkung: text(row.bemerkung),
@@ -441,9 +449,9 @@ export default function ExcelImportExport() {
           else { added++; accepted.push(row); }
         }
       }
-      setStatus(`Fertig: ${added} importiert${kind === 'Radsaetze' ? ` nach ${targetCityName} / ${IMPORT_LAGER_NAME} (ohne Lagerplatz)` : ''}, ${skipped} Duplikate übersprungen, ${review} zur manuellen Prüfung, ${issues.length} Fehler.${issues.length ? ' Teilimport möglich: bitte Ergebnis prüfen, Datei kann nach Korrektur erneut geprüft werden.' : ''}`);
+      setStatus(`Fertig: ${added} importiert${kind === 'Radsaetze' ? ` nach ${targetCityName} / ${targetWarehouseName} (ohne Lagerplatz)` : ''}, ${skipped} Duplikate übersprungen, ${review} zur manuellen Prüfung, ${issues.length} Fehler.${issues.length ? ' Teilimport möglich: bitte Ergebnis prüfen, Datei kann nach Korrektur erneut geprüft werden.' : ''}`);
       setErrors(issues);
-       if (!issues.length) { setPreview([]); setChecks([]); setReviewDecisions({}); setPreviewStandortId(''); }
+       if (!issues.length) { setPreview([]); setChecks([]); setReviewDecisions({}); setPreviewStandortId(''); setPreviewWarehouseId(''); }
     } catch (e) {
       setErrors([e instanceof Error ? e.message : String(e)]);
       setStatus(added > 0
@@ -455,12 +463,12 @@ export default function ExcelImportExport() {
 
   const visibleRows = preview.map((row, index) => ({ row, index, check: checks[index] }))
     .filter(({ row, check }) => (previewFilter === 'Alle' || check?.state === previewFilter)
-      && (!previewSearch || [row.kennzeichen, row.belegnummer, row.fahrzeug, row.vin, row.fin, row.reifengroesse, row.saison, row.kundenname, row.quelle]
-        .some(value => normalize(value).includes(normalize(previewSearch)))));
+      && (!previewSearch || normalize(Object.values(row).join(' ')).includes(normalize(previewSearch))));
   const importCount = checks.filter((check, index) => check.state === 'Neu' || (check.state === 'Prüfen' && reviewDecisions[index] === 'import')).length;
   const unresolvedCount = checks.filter((check, index) => check.state === 'Prüfen' && !reviewDecisions[index]).length;
   const selectedCity = standorte.find(city => city.id === standortId);
-  const readyForTyreImport = kind !== 'Radsaetze' || (!!selectedCity && previewStandortId === standortId);
+  const chosenWarehouse = warehouses.find(item => item.id === warehouseId && item.standort_id === standortId);
+  const readyForTyreImport = kind !== 'Radsaetze' || (!!selectedCity && !!chosenWarehouse && previewStandortId === standortId && previewWarehouseId === warehouseId);
 
   return <section style={{ maxWidth: 1100 }}>
     <h1>Excel Import / Export</h1>
@@ -490,20 +498,30 @@ export default function ExcelImportExport() {
          </select>
          {standortLoading && <p style={{ fontSize: 13 }}>Filialen werden geladen...</p>}
          {standortError && <p role="alert" style={{ color: '#b91c1c' }}>{standortError}</p>}
+         <label htmlFor="excel-ziel-lager" style={{ display: 'block', fontWeight: 700, margin: '12px 0 6px' }}>2. Ziellager auswählen *</label>
+         <select id="excel-ziel-lager" aria-label="Ziellager auswählen" value={warehouseId}
+           disabled={working || checking || warehouseLoading || !standortId || !!warehouseError}
+           onChange={event => { setWarehouseId(event.target.value); resetImportPreview(); }}
+           style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8, minWidth: 220, maxWidth: '100%' }}>
+           <option value="">Bitte Lager auswählen</option>
+           {warehouses.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+         </select>
+         {warehouseLoading && <p style={{ fontSize: 13 }}>Lager werden geladen...</p>}
+         {warehouseError && <p role="alert" style={{ color: '#b91c1c' }}>{warehouseError}</p>}
+         {standortId && !warehouseLoading && !warehouses.length && !warehouseError && <p style={{ color: '#92400e', fontSize: 13 }}>Für diese Filiale ist noch kein Lager vorhanden. Bitte zuerst im Lagerplan ein Lager anlegen.</p>}
          <p style={{ fontSize: 13, marginBottom: 0, color: '#475569' }}>
-           Die Radsätze werden zuerst der gewählten Filiale im separaten Lager „{IMPORT_LAGER_NAME}“ zugeordnet.
-           Ein physischer Lagerplatz wird beim Excel-Import <strong>nicht</strong> vergeben.
-           Die Zuordnung zu einem echten Lager und Lagerplatz wird als nächster Entwicklungsschritt ergänzt. Bereits vorhandene Glauchau-Radsätze bleiben unverändert.
+           Neue Radsätze werden direkt im gewählten Lager angelegt, zunächst <strong>ohne Lagerplatz</strong>.
+           Ein konkreter Platz wird später im Lagerplan zugewiesen. Bestehende Datensätze werden nicht verschoben.
          </p>
        </div>}
-       <label style={{ display: 'block', fontWeight: 700, marginBottom: 8 }}>{kind === 'Radsaetze' ? '2. Excel-Datei auswählen *' : 'Excel-Datei auswählen'} </label>
-      <input type="file" accept=".xlsx,.xls" disabled={working || checking || (kind === 'Radsaetze' && !selectedCity)} onChange={e => void chooseFile(e)} aria-label="Excel-Datei auswählen" />
-       {kind === 'Radsaetze' && selectedCity && <p style={{ fontSize: 13, color: '#12365a', fontWeight: 700 }}>
-         Importziel: {selectedCity.name} → {IMPORT_LAGER_NAME} → ohne Lagerplatz
+       <label style={{ display: 'block', fontWeight: 700, marginBottom: 8 }}>{kind === 'Radsaetze' ? '3. Excel-Datei auswählen *' : 'Excel-Datei auswählen'} </label>
+      <input type="file" accept=".xlsx,.xls" disabled={working || checking || (kind === 'Radsaetze' && (!selectedCity || !chosenWarehouse))} onChange={e => void chooseFile(e)} aria-label="Excel-Datei auswählen" />
+       {kind === 'Radsaetze' && selectedCity && chosenWarehouse && <p style={{ fontSize: 13, color: '#12365a', fontWeight: 700 }}>
+         Importziel: {selectedCity.name} → {chosenWarehouse.name} → ohne Lagerplatz
        </p>}
       {legacyImport && preview.length > 0 && <p style={{ color: '#92400e', fontWeight: 600 }}>Alte Lagerliste erkannt. Alle neuen Radsätze werden ohne Lagerplatz angelegt. Fehlende Kennzeichen erhalten die Kennung OHNE-KZ-...; bitte später prüfen.</p>}
       {preview.length > 0 && <>
-          <h3>3. Import prüfen · Vorschau: {preview.length} Zeilen ({filename})</h3>
+          <h3>4. Import prüfen · Vorschau: {preview.length} Zeilen ({filename})</h3>
          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
            {(['Alle', 'Neu', 'Bereits vorhanden', 'Prüfen'] as PreviewFilter[]).map(filter => <button key={filter} type="button" onClick={() => setPreviewFilter(filter)} style={{ ...button, background: previewFilter === filter ? '#12365a' : '#fff', color: previewFilter === filter ? '#fff' : '#12365a', padding: '7px 10px' }}>
              {filter === 'Prüfen' ? 'Nur Prüfen' : filter} ({filter === 'Alle' ? preview.length : checks.filter(c => c.state === filter).length})
