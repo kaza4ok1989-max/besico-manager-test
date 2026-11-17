@@ -723,7 +723,7 @@
 <div id="card" class="panel">
   <button id="closeCard" class="closeButton" type="button" title="Fenster schließen, Fahrzeug für Tastaturdrehung ausgewählt lassen">×</button>
   <h2 id="cardTitle">Fahrzeug</h2>
-  <p id="rotationKeyboardHint" style="display:none;font-size:13px;color:#12365a;background:#eff6ff;padding:8px;border-radius:7px">Fahrzeug verschieben: linke Maustaste gedrückt halten und ziehen. Mit Shift + Ziehen drehen (15°-Schritte). ← / → ebenfalls möglich.</p>
+  <p id="rotationKeyboardHint" style="display:none;font-size:13px;color:#12365a;background:#eff6ff;padding:8px;border-radius:7px">Fahrzeug verschieben: mit linker Maustaste ziehen. Fahrzeug drehen: ← / → (je 15°).</p>
 
   <div class="formRow" id="editBranchRow" style="display:none">
     <label for="editBranch">Standort / Fahrzeug verlegen</label>
@@ -2112,113 +2112,90 @@
     );
   }
 
-  /* Mausbedienung: Linke Maustaste halten und ziehen = verschieben.
-     Shift + Ziehen = Fahrzeug drehen. Nur echte Mausereignisse verwenden:
-     Geräte mit Touchscreen können trotzdem eine Maus haben. */
+  /* Fahrzeugbedienung: Ziehen mit der linken Maustaste verschiebt das Auto.
+     Drehung mit Pfeiltasten links/rechts bei ausgewähltem Fahrzeug.
+     Pointer Capture hält das Fahrzeug beim Ziehen auch außerhalb seines Symbols fest. */
   function enableDrag(marker, car) {
     let operation = null;
-    const normalizeAngle = value => ((value % 360) + 360) % 360;
 
     marker.addEventListener('pointerdown', event => {
-      if (event.pointerType !== 'mouse' || event.button !== 0 || !isAdmin() || placementMode || savingInProgress) return;
-      if (operation) return;
-      const angle = normalizeAngle(Number(car.rotation_deg || 0));
+      if (event.button !== 0 || !isAdmin() || placementMode || savingInProgress || operation) return;
+      if (event.pointerType === 'touch') return; // Finger scrollt die Karte.
       operation = {
-        pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
-        mode: event.shiftKey ? 'rotate' : 'move', initialAngle: angle,
-        angle, moved: false
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        moved: false,
+        startPosition: {x: Number(car.position_x), y: Number(car.position_y)}
       };
       selectedCar = car;
+      dragging = false;
       dragInProgress = true;
-      // Window listeners keep working when the cursor leaves the small vehicle icon.
-      window.addEventListener('pointermove', handleMove, true);
-      window.addEventListener('pointerup', handleEnd, true);
-      window.addEventListener('pointercancel', handleCancel, true);
+      try { marker.setPointerCapture(event.pointerId); } catch (_) { /* Browser fallback */ }
       event.preventDefault();
     });
 
-    function detach() {
-      window.removeEventListener('pointermove', handleMove, true);
-      window.removeEventListener('pointerup', handleEnd, true);
-      window.removeEventListener('pointercancel', handleCancel, true);
-      operation = null;
-      marker.classList.remove('dragging', 'rotating');
-    }
-
-    function handleMove(event) {
+    marker.addEventListener('pointermove', event => {
       const op = operation;
-      if (!op || event.pointerId !== op.pointerId) return;
-      const dx = event.clientX - op.startX;
-      const dy = event.clientY - op.startY;
-      if (!op.moved && Math.hypot(dx, dy) >= 4) {
+      if (!op || op.pointerId !== event.pointerId) return;
+      if (!op.moved && Math.hypot(event.clientX - op.x, event.clientY - op.y) >= 3) {
         op.moved = true;
         dragging = true;
+        marker.classList.add('dragging');
         card.style.display = 'none';
-        marker.classList.add(op.mode === 'rotate' ? 'rotating' : 'dragging');
       }
       if (!op.moved) return;
-      if (op.mode === 'move') {
-        const pos = getMapPercent(event.clientX, event.clientY);
-        marker.style.left = pos.x + '%';
-        marker.style.top = pos.y + '%';
-      } else {
-        // 10 Pixel Mausbewegung entsprechen 15 Grad.
-        op.angle = normalizeAngle(op.initialAngle + Math.round(dx / 10) * 15);
-        marker.querySelector('.carShape')?.style.setProperty('--rotation', `${op.angle}deg`);
-      }
+      const pos = getMapPercent(event.clientX, event.clientY);
+      marker.style.left = pos.x + '%';
+      marker.style.top = pos.y + '%';
       event.preventDefault();
-    }
+    });
 
-    async function handleEnd(event) {
+    marker.addEventListener('pointerup', async event => {
       const op = operation;
       if (!op || event.pointerId !== op.pointerId) return;
-      // Calculate final rotation from the release point, including quick drags.
-      if (op.mode === 'rotate' && op.moved) {
-        op.angle = normalizeAngle(op.initialAngle + Math.round((event.clientX - op.startX) / 10) * 15);
-      }
-      const changed = op.moved && (op.mode === 'move' || op.angle !== op.initialAngle);
-      const changes = op.mode === 'move'
-        ? getMapPercent(event.clientX, event.clientY)
-        : {rotation_deg: op.angle};
-      const payload = op.mode === 'move'
-        ? {position_x: changes.x, position_y: changes.y}
-        : changes;
-      detach();
-      if (!changed) {
+      operation = null;
+      try { if (marker.hasPointerCapture(event.pointerId)) marker.releasePointerCapture(event.pointerId); } catch (_) {}
+      marker.classList.remove('dragging');
+      if (!op.moved) {
         dragInProgress = false;
         renderCars();
-        window.setTimeout(() => { dragging = false; }, 120);
         return;
       }
+      const pos = getMapPercent(event.clientX, event.clientY);
+      const payload = {position_x: pos.x, position_y: pos.y};
       savingInProgress = true;
       try {
-        setStatus(op.mode === 'rotate' ? 'Drehung wird gespeichert...' : 'Position wird gespeichert...');
+        setStatus('Position wird gespeichert...');
         await apiRequest(`cars?id=eq.${car.id}`, {
-          method: 'PATCH', headers: {Prefer: 'return=minimal'}, body: JSON.stringify(payload)
+          method: 'PATCH',
+          headers: {Prefer: 'return=minimal'},
+          body: JSON.stringify(payload)
         });
         Object.assign(car, payload);
         lastCarsSnapshot = '';
-        setStatus(op.mode === 'rotate' ? 'Drehung gespeichert.' : 'Position gespeichert.');
+        setStatus('Position gespeichert.');
       } catch (error) {
         console.error(error);
-        alert((op.mode === 'rotate' ? 'Drehung' : 'Position') + ' konnte nicht gespeichert werden: ' + error.message);
+        alert('Position konnte nicht gespeichert werden: ' + error.message);
       } finally {
         dragInProgress = false;
         savingInProgress = false;
         renderCars();
-        window.setTimeout(() => { dragging = false; }, 120);
+        window.setTimeout(() => { dragging = false; }, 180);
         void loadCars(true);
       }
       event.preventDefault();
-    }
+    });
 
-    function handleCancel(event) {
-      if (!operation || event.pointerId !== operation.pointerId) return;
-      detach();
+    marker.addEventListener('pointercancel', event => {
+      if (!operation || operation.pointerId !== event.pointerId) return;
+      operation = null;
+      marker.classList.remove('dragging');
       dragInProgress = false;
       dragging = false;
       renderCars();
-    }
+    });
   }
 
   /* КАРТОЧКА МАШИНЫ */
@@ -2309,7 +2286,7 @@
   $("closeCard").addEventListener("click", () => {
     card.style.display = "none";
     if (selectedCar && isAdmin() && (branchOf(selectedCar) === 1 || branchOf(selectedCar) === 8)) {
-      setStatus("Fahrzeug ausgewählt: " + (selectedCar.fahrnummer || selectedCar.vin5 || selectedCar.model || "Fahrzeug") + ". Mit linker Maustaste verschieben; mit Shift + Ziehen oder ← / → um 15° drehen. Esc beendet die Auswahl.");
+      setStatus("Fahrzeug ausgewählt: " + (selectedCar.fahrnummer || selectedCar.vin5 || selectedCar.model || "Fahrzeug") + ". Mit linker Maustaste verschieben; mit ← / → um 15° drehen. Esc beendet die Auswahl.");
     }
   });
 
