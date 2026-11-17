@@ -5,6 +5,7 @@ import { RefreshCw, Search, MapPin, FileText, Plus, Trash2, GripVertical, Printe
 
 type Schein = { id: string; belegnummer: string | null; kennzeichen: string; lager: string; lagerplatz: string; daten: Record<string, unknown> | null; erstellt_am: string; besico_lager_id: string | null };
 type WarehouseInfo = { id: string; standort_id: string; name: string };
+type BranchRadsatz = { id: string; belegnummer: string | null; kennzeichen: string; lagerplatz: string; besico_lager_id: string | null; daten: Record<string, unknown> | null; erstellt_am: string };
 type BereichTyp = 'Regal' | 'Reihe' | 'Bereich';
 type LagerBereich = { id: string; lager_id: string; name: string; typ: BereichTyp };
 type LagerPlatz = { id: string; bereich_id: string; ebene: string; platz_nummer: string };
@@ -16,6 +17,14 @@ const searchNorm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
 const field = (r: Schein, key: string) => String(r.daten?.[key] ?? '').trim();
 const qrUrl = (id: string) => `${window.location.origin}${import.meta.env.BASE_URL}?qr=${encodeURIComponent(id)}`;
 const keyOf = (area: string, place: string) => `${norm(area)}::${norm(place)}`;
+// Persist a readable warehouse-specific location, e.g. "Reihe 1 / Stapel 3 / Unten".
+// The EXISTING database unique index on (besico_lager_id, normalized lagerplatz)
+// protects this against simultaneous occupancy. Names are not editable in this UI.
+const newPlaceLabel = (area: LagerBereich, place: LagerPlatz): string =>
+  area.typ === 'Reihe'
+    ? `${area.name} / Stapel ${Number(place.platz_nummer) || place.platz_nummer} / ${place.ebene}`
+    : `${area.typ} ${area.name} / Platz ${place.platz_nummer} / ${place.ebene}`;
+
 // Original locations imported from Excel are stored separately from current locations.
 const oldArea = (r: Schein) => field(r, 'bereich_alt');
 const oldPlace = (r: Schein) => field(r, 'lagerplatz_alt');
@@ -31,6 +40,20 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const [branchWarehouses, setBranchWarehouses] = useState<WarehouseInfo[]>([]);
   const [selectedWarehouseId, setSelectedWarehouseId] = useState('');
   const [newWarehouseName, setNewWarehouseName] = useState('');
+  // Read-only branch stock, including imported sets in Wareneingang (Excel).
+  const [branchStock, setBranchStock] = useState<BranchRadsatz[]>([]);
+  const [branchStockLoading, setBranchStockLoading] = useState(false);
+  const [branchStockError, setBranchStockError] = useState('');
+  const [branchStockRefresh, setBranchStockRefresh] = useState(0);
+  const [branchStockQuery, setBranchStockQuery] = useState('');
+  const [stockWorking, setStockWorking] = useState(false);
+  const [stockMessage, setStockMessage] = useState('');
+  const [stockError, setStockError] = useState('');
+  const [draggedStockId, setDraggedStockId] = useState<string | null>(null);
+  const [assignStockId, setAssignStockId] = useState('');
+  const [assignPlaceId, setAssignPlaceId] = useState('');
+  const [dropHoverPlaceId, setDropHoverPlaceId] = useState<string | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -86,6 +109,70 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
 
   const availableWarehouses = branchWarehouses.filter(item => item.standort_id === standortId);
   const selectedWarehouse = availableWarehouses.find(item => item.id === selectedWarehouseId);
+  useEffect(() => { setAssignPlaceId(''); setDropHoverPlaceId(null); }, [selectedWarehouseId]);
+
+
+  // Never query across branches: retrieve receipts only by this city's warehouse IDs.
+  // Loaded sets are displayed without changing the receipts or assigning slots.
+  useEffect(() => {
+    let active = true;
+    const ids = branchWarehouses
+      .filter(item => item.standort_id === standortId).map(item => item.id);
+    setBranchStock([]);
+    setBranchStockError('');
+    if (!ids.length) {
+      setBranchStockLoading(false);
+      return () => { active = false; };
+    }
+    setBranchStockLoading(true);
+    void (async () => {
+      try {
+        const all: BranchRadsatz[] = [];
+        // Page Supabase results; the API's default maximum is often 1,000.
+        for (let batchIndex = 0; batchIndex < ids.length; batchIndex += 25) {
+          const warehouseIds = ids.slice(batchIndex, batchIndex + 25);
+          for (let start = 0; ; start += 1000) {
+            const { data, error: readError } = await supabase.from('reifenlager_scheine')
+              .select('id,belegnummer,kennzeichen,lagerplatz,besico_lager_id,daten,erstellt_am')
+              .in('besico_lager_id', warehouseIds)
+              .order('erstellt_am', { ascending: false })
+              .range(start, start + 999);
+            if (readError) throw readError;
+            const page = (data ?? []) as BranchRadsatz[];
+            all.push(...page);
+            if (page.length < 1000) break;
+          }
+        }
+        if (active) setBranchStock(all);
+      } catch (cause) {
+        if (active) setBranchStockError('Radsätze konnten nicht geladen werden: ' +
+          (cause instanceof Error ? cause.message : String(cause)));
+      } finally {
+        if (active) setBranchStockLoading(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [branchWarehouses, standortId, branchStockRefresh]);
+
+  const incomingWarehouse = availableWarehouses.find(item => item.name.trim().toLocaleLowerCase('de-DE') === 'wareneingang (excel)');
+  const visibleBranchStock = branchStock.filter(item =>
+    availableWarehouses.some(warehouse => warehouse.id === item.besico_lager_id));
+  const incomingCount = incomingWarehouse
+    ? visibleBranchStock.filter(item => item.besico_lager_id === incomingWarehouse.id).length : 0;
+  const selectedWarehouseCount = visibleBranchStock.filter(item => item.besico_lager_id === selectedWarehouseId).length;
+  const stockTerm = searchNorm(branchStockQuery);
+  const filteredBranchStock = visibleBranchStock.filter(item => {
+    if (!stockTerm) return true;
+    const warehouseName = availableWarehouses.find(warehouse => warehouse.id === item.besico_lager_id)?.name ?? '';
+    const values = [item.kennzeichen, item.belegnummer, item.lagerplatz, warehouseName,
+      ...Object.values(item.daten ?? {}).filter(value => typeof value === 'string' || typeof value === 'number')];
+    return searchNorm(values.join(' ')).includes(stockTerm);
+  }).sort((a, b) => {
+    // Show unassigned incoming stock first; keep the remainder in date order.
+    const aIncoming = a.besico_lager_id === incomingWarehouse?.id ? 0 : 1;
+    const bIncoming = b.besico_lager_id === incomingWarehouse?.id ? 0 : 1;
+    return aIncoming - bIncoming || b.erstellt_am.localeCompare(a.erstellt_am);
+  });
 
   useEffect(() => {
     let active = true;
@@ -190,7 +277,121 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
 
   const selectedArea = areas.find(area => area.id === selectedAreaId && area.lager_id === selectedWarehouse?.id);
   const selectedAreaPlaces = selectedArea ? places.filter(place => place.bereich_id === selectedArea.id) : [];
-  const layoutBusy = loading || saving || structureLoading || structureSaving || structureReadFailed;
+  const layoutBusy = loading || saving || structureLoading || structureSaving || structureReadFailed || stockWorking;
+
+  const physicalWarehouseSelected = !!selectedWarehouse &&
+    selectedWarehouse.name.trim().toLocaleLowerCase('de-DE') !== 'wareneingang (excel)';
+  // Combine only place IDs belonging to the selected warehouse. It is never safe to
+  // build locations from the global legacy shelf tables for another branch.
+  const newWarehouseSlots = places.flatMap(place => {
+    const area = areas.find(entry => entry.id === place.bereich_id && entry.lager_id === selectedWarehouseId);
+    return area ? [{ area, place, label: newPlaceLabel(area, place) }] : [];
+  });
+  const warehouseStock = visibleBranchStock.filter(item => item.besico_lager_id === selectedWarehouseId);
+  const stockForPlace = (label: string) => warehouseStock.filter(item => norm(item.lagerplatz) === norm(label));
+  // Fail closed while any read is incomplete; never offer a possibly occupied slot.
+  const stockIsVerified = !!selectedWarehouse && !loading && !structureLoading &&
+    !branchStockLoading && !branchStockError && !structureReadFailed &&
+    warehouseWheelCount !== null && warehouseWheelCount === warehouseStock.length;
+  const unmatchedPlaces = warehouseStock.filter(item => !!item.lagerplatz?.trim() &&
+    !newWarehouseSlots.some(slot => norm(slot.label) === norm(item.lagerplatz)));
+  const slotNamesAreUnique = new Set(newWarehouseSlots.map(slot => norm(slot.label))).size === newWarehouseSlots.length;
+  const planIsVerified = stockIsVerified && unmatchedPlaces.length === 0 && slotNamesAreUnique;
+  const freeNewSlots = planIsVerified && physicalWarehouseSelected
+    ? newWarehouseSlots.filter(slot => stockForPlace(slot.label).length === 0) : [];
+  const assignStock = visibleBranchStock.find(item => item.id === assignStockId);
+
+  async function moveBranchStock(scheinId: string, placeId: string) {
+    if (stockWorking || layoutBusy || !planIsVerified || !physicalWarehouseSelected || !selectedWarehouse) return;
+    const set = visibleBranchStock.find(item => item.id === scheinId);
+    const slot = newWarehouseSlots.find(item => item.place.id === placeId);
+    if (!set || !slot) { setStockError('Radsatz oder Lagerplatz nicht gefunden. Bitte aktualisieren.'); return; }
+    if (!set.besico_lager_id || !availableWarehouses.some(item => item.id === set.besico_lager_id)) {
+      setStockError('Dieser Radsatz gehört nicht zur ausgewählten Filiale. Verschieben gesperrt.'); return;
+    }
+    if (stockForPlace(slot.label).some(item => item.id !== set.id)) {
+      setStockError('Der Zielplatz ist bereits belegt.'); return;
+    }
+    if (set.besico_lager_id === selectedWarehouse.id && norm(set.lagerplatz) === norm(slot.label)) return;
+    if (!window.confirm(`${set.kennzeichen || set.belegnummer || 'Radsatz'} verschieben?\n\nFiliale: ${standortName}\nLager: ${selectedWarehouse.name}\nLagerplatz: ${slot.label}\n\nEinlagerungsschein, QR und Historie bleiben erhalten.`)) return;
+    setStockWorking(true); setStockError(''); setStockMessage('');
+    try {
+      // Reconfirm that the destination warehouse, area and place still belong to
+      // this city/warehouse; no schema assumptions or cross-city moves.
+      const [targetResult, areaResult, placeResult, sourceResult] = await Promise.all([
+        supabase.from('besico_lager').select('id').eq('id', selectedWarehouse.id).eq('standort_id', standortId).single(),
+        supabase.from('besico_lager_bereiche').select('id').eq('id', slot.area.id).eq('lager_id', selectedWarehouse.id).single(),
+        supabase.from('besico_lagerplaetze').select('id').eq('id', slot.place.id).eq('bereich_id', slot.area.id).single(),
+        supabase.from('reifenlager_scheine').select('id,besico_lager_id,lagerplatz').eq('id', set.id).single(),
+      ]);
+      if (targetResult.error || !targetResult.data || areaResult.error || !areaResult.data ||
+          placeResult.error || !placeResult.data || sourceResult.error || !sourceResult.data) {
+        throw new Error('Lager, Lagerplatz oder Radsatz konnte nicht sicher geprüft werden.');
+      }
+      const current = sourceResult.data as { id: string; besico_lager_id: string | null; lagerplatz: string };
+      if (current.besico_lager_id !== set.besico_lager_id || norm(current.lagerplatz) !== norm(set.lagerplatz)) {
+        throw new Error('Der Radsatz wurde inzwischen verändert. Bitte Bestand aktualisieren.');
+      }
+      // The unique index besico_lager_id+normalized lagerplatz is the final
+      // collision guard, including simultaneous updates from two browsers.
+      const { data: updated, error: writeError } = await supabase.from('reifenlager_scheine')
+        .update({ besico_lager_id: selectedWarehouse.id, lager: '', lagerplatz: slot.label })
+        .eq('id', set.id).eq('besico_lager_id', set.besico_lager_id)
+        .eq('lagerplatz', current.lagerplatz).select('id');
+      if (writeError) throw new Error(writeError.message);
+      if (updated?.length !== 1) throw new Error('Keine Änderung bestätigt. Bestand bitte erneut laden.');
+      setStockMessage(`${set.kennzeichen || 'Radsatz'} → ${selectedWarehouse.name} / ${slot.label} gespeichert.`);
+      setAssignStockId(''); setAssignPlaceId('');
+      setBranchStockRefresh(n => n + 1);
+      setStructureReload(n => n + 1);
+    } catch (cause) {
+      setStockError('Platz zuweisen: ' + (cause instanceof Error ? cause.message : String(cause)));
+      setBranchStockRefresh(n => n + 1);
+      setStructureReload(n => n + 1);
+    } finally { setStockWorking(false); setDraggedStockId(null); setDropHoverPlaceId(null); }
+  }
+
+  async function releaseBranchStock(scheinId: string) {
+    if (stockWorking || layoutBusy) return;
+    const set = visibleBranchStock.find(item => item.id === scheinId);
+    if (!set || !set.besico_lager_id || !availableWarehouses.some(item => item.id === set.besico_lager_id)) return;
+    if (!set.lagerplatz.trim()) return;
+    if (!window.confirm(`${set.kennzeichen || set.belegnummer || 'Radsatz'}: Lagerplatz freigeben?\nDer Radsatz bleibt im selben Lager; Schein und QR bleiben bestehen.`)) return;
+    setStockWorking(true); setStockError(''); setStockMessage('');
+    try {
+      const { data, error: writeError } = await supabase.from('reifenlager_scheine')
+        .update({ lagerplatz: '' }).eq('id', set.id)
+        .eq('besico_lager_id', set.besico_lager_id)
+        .eq('lagerplatz', set.lagerplatz).select('id');
+      if (writeError) throw new Error(writeError.message);
+      if (data?.length !== 1) throw new Error('Freigabe nicht bestätigt. Bitte aktualisieren.');
+      setStockMessage(`${set.kennzeichen || 'Radsatz'}: Lagerplatz freigegeben (Lager bleibt erhalten).`);
+      setBranchStockRefresh(n => n + 1); setStructureReload(n => n + 1);
+    } catch (cause) {
+      setStockError('Platz freigeben: ' + (cause instanceof Error ? cause.message : String(cause)));
+    } finally { setStockWorking(false); }
+  }
+
+  function onBranchDragStart(event: DragEvent<HTMLElement>, id: string) {
+    if (!planIsVerified || stockWorking || !physicalWarehouseSelected) { event.preventDefault(); return; }
+    event.dataTransfer.setData('text/plain', id);
+    event.dataTransfer.effectAllowed = 'move';
+    setDraggedStockId(id);
+  }
+  function onBranchDragOver(event: DragEvent<HTMLDivElement>, placeId: string) {
+    if (stockWorking || layoutBusy || !planIsVerified || !draggedStockId ||
+        !freeNewSlots.some(item => item.place.id === placeId)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    setDropHoverPlaceId(placeId);
+  }
+  function onBranchDrop(event: DragEvent<HTMLDivElement>, placeId: string) {
+    event.preventDefault();
+    const id = event.dataTransfer.getData('text/plain') || draggedStockId;
+    setDropHoverPlaceId(null); setDraggedStockId(null);
+    if (id && freeNewSlots.some(item => item.place.id === placeId)) void moveBranchStock(id, placeId);
+  }
+
 
   async function createArea() {
     if (layoutBusy || !selectedWarehouse) return;
@@ -459,35 +660,149 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   };
   const canDeleteStructure = warehouseWheelCount === 0 && !layoutBusy;
   function placeTile(place: LagerPlatz) {
+    const slot = newWarehouseSlots.find(item => item.place.id === place.id);
+    const here = slot ? stockForPlace(slot.label) : [];
+    const isFree = planIsVerified && !here.length;
+    const hover = dropHoverPlaceId === place.id && isFree;
+    const color = !planIsVerified ? '#e2e8f0' : here.length > 1 ? '#fed7aa' : here.length ? '#fecaca' : '#dcfce7';
     const verifiedEmpty = warehouseWheelCount === 0;
-    return <div key={place.id} title={`${place.ebene} · Platz ${place.platz_nummer}`}
-      style={{ border: '1px solid #cbd5e1', background: verifiedEmpty ? '#dcfce7' : '#e2e8f0',
-        borderRadius: 7, minHeight: 39, padding: '4px 3px', textAlign: 'center',
-        display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 2,
-        color: '#172b4d', fontSize: 11 }}>
+    return <div key={place.id} title={slot?.label || `${place.ebene} / ${place.platz_nummer}`}
+      onDragOver={event => onBranchDragOver(event, place.id)}
+      onDragLeave={() => setDropHoverPlaceId(old => old === place.id ? null : old)}
+      onDrop={event => onBranchDrop(event, place.id)}
+      style={{ border: hover ? '3px dashed #2563eb' : '1px solid #cbd5e1',
+        background: hover ? '#bfdbfe' : color, borderRadius: 7, minHeight: 48,
+        padding: '5px 3px', textAlign: 'center', display: 'flex', flexDirection: 'column',
+        justifyContent: 'center', gap: 3, color: '#172b4d', fontSize: 11 }}>
       <strong>{place.ebene}</strong>
-      <small style={{ fontSize: 10 }}>{verifiedEmpty ? `Platz ${place.platz_nummer} · Frei` : `Platz ${place.platz_nummer} · ungeprüft`}</small>
-      {canDeleteStructure && <button type="button" title="Lagerplatz löschen" aria-label={`Platz ${place.ebene} ${place.platz_nummer} löschen`}
+      <small style={{ fontSize: 10 }}>{!planIsVerified ? `Platz ${place.platz_nummer} · ungeprüft` :
+        here.length > 1 ? `${here.length} Radsätze!` : here.length ? here[0].kennzeichen : `Platz ${place.platz_nummer} · Frei`}</small>
+      {here.length === 1 && <button type="button" style={{ ...btn, fontSize: 10, padding: '3px 5px' }}
+        onClick={() => { setAssignStockId(here[0].id); setAssignPlaceId(''); document.getElementById('filiale-radsaetze')?.scrollIntoView({ behavior: 'smooth' }); }}>
+        Radsatz anzeigen
+      </button>}
+      {canDeleteStructure && verifiedEmpty && <button type="button" title="Lagerplatz löschen" aria-label={`Platz ${place.ebene} ${place.platz_nummer} löschen`}
         onClick={() => void deletePlace(place)} style={{ ...btn, color: '#b91c1c', border: 'none', padding: '2px 4px', fontSize: 10, alignSelf: 'center' }}>
         <Trash2 size={12} style={{ verticalAlign: 'middle' }} /> Platz löschen
       </button>}
     </div>;
   }
 
-  return <section style={{ maxWidth: 1300 }}>
+  return <section style={{ maxWidth: 1300 }}
+    onDragOver={event => {
+      if (!draggedStockId || !planIsVerified) return;
+      if (event.clientY < 100) window.scrollBy(0, -28);
+      else if (event.clientY > window.innerHeight - 100) window.scrollBy(0, 28);
+    }}>
     <h1>Lagerplan · {standortName}</h1>
     <p style={{ color: '#64748b' }}>Jede Filiale verwaltet ihre eigenen Lager. Die vorhandenen Lager und Radsätze aus Glauchau bleiben unverändert.</p>
     <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Lager auswählen</h2>
       {loading ? <p>Lager werden geladen...</p> : <label style={{ display: 'grid', gap: 6, maxWidth: 400 }}>
         Lager in {standortName}
-        <select value={selectedWarehouse?.id ?? ''} onChange={event => setSelectedWarehouseId(event.target.value)} disabled={!availableWarehouses.length || saving || structureSaving} style={btn}>
+        <select value={selectedWarehouse?.id ?? ''} onChange={event => setSelectedWarehouseId(event.target.value)} disabled={!availableWarehouses.length || saving || structureSaving || stockWorking} style={btn}>
           {!availableWarehouses.length && <option value="">Noch kein Lager vorhanden</option>}
           {availableWarehouses.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
         </select>
       </label>}
       {!loading && !availableWarehouses.length && !error && <p>Für diese Filiale wurde noch kein Lager angelegt.</p>}
       {selectedWarehouse && <p style={{ color: '#475569', marginBottom: 0 }}>Ausgewähltes Lager: <strong>{selectedWarehouse.name}</strong></p>}
+    </div>
+    <div id="filiale-radsaetze" style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <h2 style={{ marginTop: 0 }}>Radsätze in {standortName}</h2>
+      <p style={{ color: '#475569', fontSize: 13 }}>
+        Excel-Importe liegen zunächst im Lager <strong>Wareneingang (Excel)</strong>, ohne festen Lagerplatz.
+        Hier sind alle Radsätze dieser Filiale sichtbar. Lager wählen, Radsatz zuweisen oder eine Karte auf einen grünen Platz ziehen.
+      </p>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+        <strong>Gesamt: {branchStockLoading ? '…' : visibleBranchStock.length}</strong>
+        <span>Wareneingang: <strong>{branchStockLoading ? '…' : incomingCount}</strong></span>
+        {selectedWarehouse && <span>{selectedWarehouse.name}: <strong>{branchStockLoading ? '…' : selectedWarehouseCount}</strong></span>}
+        <button type="button" style={{ ...btn, display: 'inline-flex', gap: 6, alignItems: 'center' }}
+          disabled={branchStockLoading || loading} onClick={() => setBranchStockRefresh(value => value + 1)}>
+          <RefreshCw size={15} /> Bestand aktualisieren
+        </button>
+        {incomingWarehouse && selectedWarehouseId !== incomingWarehouse.id && <button type="button" style={btn}
+          onClick={() => setSelectedWarehouseId(incomingWarehouse.id)}>Wareneingang auswählen</button>}
+      </div>
+      {branchStockError && <p role="alert" style={{ color: '#b91c1c', fontWeight: 700 }}>{branchStockError}</p>}
+      {stockError && <p role="alert" style={{ color: '#b91c1c', fontWeight: 700 }}>{stockError}</p>}
+      {stockMessage && <p role="status" style={{ color: '#166534', fontWeight: 700 }}>{stockMessage}</p>}
+      {physicalWarehouseSelected && <p style={{ color: '#475569', fontSize: 13 }}>
+        Ziel für die Einlagerung: <strong>{selectedWarehouse?.name}</strong>. Lager oben wechseln, um ein anderes Ziel zu wählen.
+      </p>}
+      {!planIsVerified && physicalWarehouseSelected && <p style={{ color: '#92400e', fontSize: 12 }}>
+        Platzbelegung wird geprüft. Bis alle Lagerplätze eindeutig erkannt sind, ist das Verschieben gesperrt.
+      </p>}
+      {unmatchedPlaces.length > 0 && <p role="alert" style={{ color: '#92400e', fontSize: 12 }}>
+        {unmatchedPlaces.length} gespeicherte Lagerplätze konnten nicht eindeutig einer Zelle zugeordnet werden. Bitte zuerst prüfen.
+      </p>}
+      {!slotNamesAreUnique && <p role="alert" style={{ color: '#b91c1c', fontSize: 12 }}>
+        Mehrere Lagerplätze haben dieselbe Bezeichnung. Zur Sicherheit ist das Verschieben gesperrt.
+      </p>}
+      {assignStock && <div style={{ border: '2px solid #2563eb', background: '#eff6ff', borderRadius: 10, padding: 12, marginBottom: 14 }}>
+        <strong>Platz zuweisen · {assignStock.kennzeichen}</strong>
+        <p style={{ fontSize: 12 }}>Ziel: {selectedWarehouse?.name || 'Bitte ein Lager wählen'}. Nur geprüfte freie Plätze stehen zur Auswahl.</p>
+        <div style={{ display: 'flex', alignItems: 'end', gap: 8, flexWrap: 'wrap' }}>
+          <label style={{ display: 'grid', gap: 5, flex: '1 1 240px' }}>Freier Lagerplatz
+            <select value={assignPlaceId} disabled={!planIsVerified || stockWorking || !physicalWarehouseSelected}
+              onChange={event => setAssignPlaceId(event.target.value)} style={btn}>
+              <option value="">Bitte freien Platz auswählen</option>
+              {freeNewSlots.map(slot => <option key={slot.place.id} value={slot.place.id}>{slot.label}</option>)}
+            </select>
+          </label>
+          <button type="button" style={{ ...btn, background: '#12365a', color: '#fff' }}
+            disabled={!assignPlaceId || stockWorking || !planIsVerified || !physicalWarehouseSelected}
+            onClick={() => void moveBranchStock(assignStock.id, assignPlaceId)}>Speichern</button>
+          <button type="button" style={btn} onClick={() => { setAssignStockId(''); setAssignPlaceId(''); }}>Abbrechen</button>
+        </div>
+      </div>}
+
+      {branchStockLoading ? <p>Radsätze werden geladen...</p> : !branchStockError && <>
+        <label style={{ display: 'grid', gap: 5, marginBottom: 12, maxWidth: 440 }}>
+          Radsätze suchen
+          <input value={branchStockQuery} onChange={event => setBranchStockQuery(event.target.value)}
+            placeholder="Kennzeichen, Beleg, Excel-Lagerplatz ..."
+            style={{ padding: 10, borderRadius: 8, border: '1px solid #cbd5e1' }} />
+        </label>
+        {visibleBranchStock.length === 0 && <p>Für diese Filiale wurden keine Radsätze gefunden. Bitte das Ergebnis unter „Excel Import / Export“ prüfen.</p>}
+        {visibleBranchStock.length > 0 && filteredBranchStock.length === 0 && <p>Keine Radsätze für diesen Suchbegriff.</p>}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 270px), 1fr))', gap: 10 }}>
+          {filteredBranchStock.slice(0, 100).map(item => {
+            const warehouse = availableWarehouses.find(entry => entry.id === item.besico_lager_id);
+            const previousArea = String(item.daten?.bereich_alt ?? '').trim();
+            const previousPlace = String(item.daten?.lagerplatz_alt ?? '').trim();
+            return <article key={item.id} draggable={!stockWorking && planIsVerified && physicalWarehouseSelected}
+              onDragStart={event => onBranchDragStart(event, item.id)}
+              onDragEnd={() => { setDraggedStockId(null); setDropHoverPlaceId(null); }}
+              style={{ border: assignStockId === item.id ? '2px solid #2563eb' : '1px solid #dbe3ee',
+                borderRadius: 10, padding: 12, background: '#f8fafc', cursor: planIsVerified && physicalWarehouseSelected ? 'grab' : 'default' }}>
+              <strong style={{ color: '#12365a' }}>{item.kennzeichen || 'Ohne Kennzeichen'}</strong>
+              <p style={{ margin: '7px 0', fontSize: 13 }}>Beleg: {item.belegnummer || '—'}</p>
+              <p style={{ margin: '7px 0', fontSize: 13 }}>Lager: <strong>{warehouse?.name || 'Unbekannt'}</strong></p>
+              <p style={{ margin: '7px 0', fontSize: 13 }}>Lagerplatz: {item.lagerplatz?.trim() || 'Noch nicht zugewiesen'}</p>
+              {(previousArea || previousPlace) && <p style={{ margin: '7px 0', color: '#475569', fontSize: 12 }}>
+                Excel (alter Platz): {[previousArea, previousPlace].filter(Boolean).join(' / ')}
+              </p>}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                <a href={qrUrl(item.id)} style={{ ...btn, textDecoration: 'none', display: 'inline-block', fontSize: 12, padding: '6px 10px' }}>
+                  <FileText size={14} style={{ verticalAlign: 'middle', marginRight: 5 }} /> Schein / QR
+                </a>
+                <button type="button" style={{ ...btn, padding: '6px 10px', fontSize: 12 }}
+                  disabled={stockWorking}
+                  onClick={() => { setAssignStockId(item.id); setAssignPlaceId(''); setStockError(''); }}>
+                  Platz zuweisen
+                </button>
+                {!!item.lagerplatz.trim() && <button type="button" style={{ ...btn, padding: '6px 10px', fontSize: 12, color: '#166534' }}
+                  disabled={stockWorking} onClick={() => void releaseBranchStock(item.id)}>Platz freigeben</button>}
+              </div>
+            </article>;
+          })}
+        </div>
+        {filteredBranchStock.length > 100 && <p style={{ color: '#64748b', fontSize: 13 }}>
+          {filteredBranchStock.length} Treffer. Aus Gründen der Übersichtlichkeit werden die ersten 100 angezeigt. Bitte Suche verwenden.
+        </p>}
+      </>}
     </div>
     <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Neues Lager anlegen</h2>
@@ -572,7 +887,7 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
           <button type="button" style={btn} disabled={structureSaving} onClick={() => setStructureReload(n => n + 1)}><RefreshCw size={15} style={{ verticalAlign: 'middle' }} /> Aktualisieren</button>
         </div>
         {warehouseWheelCount === null && <p style={{ color: '#92400e', fontSize: 13 }}>Belegung nicht überprüft: Plätze werden vorsichtshalber nicht als frei markiert. Löschen gesperrt.</p>}
-        {warehouseWheelCount !== null && warehouseWheelCount > 0 && <p style={{ color: '#92400e', fontSize: 13 }}>In diesem Lager sind {warehouseWheelCount} Radsätze gespeichert. Die Zuordnung zu den neuen Plätzen ist noch nicht fertig. Löschen ist gesperrt.</p>}
+        {warehouseWheelCount !== null && warehouseWheelCount > 0 && <p style={{ color: '#92400e', fontSize: 13 }}>In diesem Lager sind {warehouseWheelCount} Radsätze gespeichert. Struktur löschen ist zum Schutz der Radsätze gesperrt.</p>}
         {areas.length === 0 && <p>In diesem Lager wurden noch keine Regale oder Reihen angelegt.</p>}
         {areas.some(area => area.typ === 'Reihe') && <>
           <h3 style={{ marginTop: 18 }}>Lagerplan · Reihen</h3>
@@ -637,7 +952,7 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
         </>}
       </>}
     </div>}
-    <p style={{ color: '#64748b', fontSize: 13 }}>Radsätze einlagern, verschieben und Excel-Import für neue Lager bleiben gesperrt, bis die sichere Zuordnung je Lager fertiggestellt und geprüft ist. Die Glauchau-Daten werden nicht geändert.</p>
+    <p style={{ color: '#64748b', fontSize: 13 }}>Excel-Importe werden zuerst im Wareneingang gespeichert. Radsätze können anschließend in einen ausgewählten Lagerplatz verschoben werden. Die Glauchau-Daten bleiben unverändert.</p>
   </section>;
 }
 
