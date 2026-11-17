@@ -2112,93 +2112,113 @@
     );
   }
 
-  /* Maus: Linksklick + Ziehen = drehen; Umschalt + Ziehen = verschieben.
-     Nur Administratoren, nur Kartenstandorte. Mobile-Touch bleibt unverändert. */
+  /* Mausbedienung: Linke Maustaste halten und horizontal ziehen = drehen.
+     Shift + Ziehen = Fahrzeug verschieben. Nur echte Mausereignisse verwenden:
+     Geräte mit Touchscreen können trotzdem eine Maus haben. */
   function enableDrag(marker, car) {
-    if (window.matchMedia('(pointer: coarse)').matches) return;
-    let startX = 0, startY = 0, moved = false, mode = 'rotate';
-    let originalAngle = 0, previewAngle = 0;
-    const normalizeAngle = angle => ((angle % 360) + 360) % 360;
+    let operation = null;
+    const normalizeAngle = value => ((value % 360) + 360) % 360;
 
     marker.addEventListener('pointerdown', event => {
-      if (!isAdmin() || placementMode || event.button !== 0) return;
-      dragging = false;
-      moved = false;
-      mode = event.shiftKey ? 'move' : 'rotate';
-      startX = event.clientX;
-      startY = event.clientY;
-      originalAngle = normalizeAngle(Number(car.rotation_deg || 0));
-      previewAngle = originalAngle;
+      if (event.pointerType !== 'mouse' || event.button !== 0 || !isAdmin() || placementMode || savingInProgress) return;
+      if (operation) return;
+      const angle = normalizeAngle(Number(car.rotation_deg || 0));
+      operation = {
+        pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
+        mode: event.shiftKey ? 'move' : 'rotate', initialAngle: angle,
+        angle, moved: false
+      };
       selectedCar = car;
       dragInProgress = true;
-      marker.setPointerCapture(event.pointerId);
+      // Window listeners keep working when the cursor leaves the small vehicle icon.
+      window.addEventListener('pointermove', handleMove, true);
+      window.addEventListener('pointerup', handleEnd, true);
+      window.addEventListener('pointercancel', handleCancel, true);
       event.preventDefault();
     });
 
-    marker.addEventListener('pointermove', event => {
-      if (!marker.hasPointerCapture(event.pointerId)) return;
-      const distance = Math.hypot(event.clientX - startX, event.clientY - startY);
-      if (!moved && distance > 6) {
-        moved = true;
+    function detach() {
+      window.removeEventListener('pointermove', handleMove, true);
+      window.removeEventListener('pointerup', handleEnd, true);
+      window.removeEventListener('pointercancel', handleCancel, true);
+      operation = null;
+      marker.classList.remove('dragging', 'rotating');
+    }
+
+    function handleMove(event) {
+      const op = operation;
+      if (!op || event.pointerId !== op.pointerId) return;
+      const dx = event.clientX - op.startX;
+      const dy = event.clientY - op.startY;
+      if (!op.moved && Math.hypot(dx, dy) >= 4) {
+        op.moved = true;
         dragging = true;
-        // Während der Bedienung die große Fahrzeugkarte ausblenden.
         card.style.display = 'none';
-        marker.classList.add(mode === 'rotate' ? 'rotating' : 'dragging');
+        marker.classList.add(op.mode === 'rotate' ? 'rotating' : 'dragging');
       }
-      if (!moved) return;
-      if (mode === 'move') {
+      if (!op.moved) return;
+      if (op.mode === 'move') {
         const pos = getMapPercent(event.clientX, event.clientY);
         marker.style.left = pos.x + '%';
         marker.style.top = pos.y + '%';
       } else {
-        // Eine Rasterstufe (15 Grad) pro 18 Pixel horizontaler Mausbewegung.
-        const steps = Math.round((event.clientX - startX) / 18);
-        previewAngle = normalizeAngle(originalAngle + steps * 15);
-        marker.querySelector('.carShape')?.style.setProperty('--rotation', `${previewAngle}deg`);
+        // 10 Pixel Mausbewegung entsprechen 15 Grad.
+        op.angle = normalizeAngle(op.initialAngle + Math.round(dx / 10) * 15);
+        marker.querySelector('.carShape')?.style.setProperty('--rotation', `${op.angle}deg`);
       }
-    });
+      event.preventDefault();
+    }
 
-    marker.addEventListener('pointerup', async event => {
-      if (!marker.hasPointerCapture(event.pointerId)) return;
-      marker.releasePointerCapture(event.pointerId);
-      marker.classList.remove('dragging', 'rotating');
-      if (!moved) { dragInProgress = false; return; }
-      const changes = mode === 'move'
-        ? (() => { const pos = getMapPercent(event.clientX, event.clientY); return {position_x: pos.x, position_y: pos.y}; })()
-        : {rotation_deg: previewAngle};
-      if (mode === 'rotate' && previewAngle === originalAngle) {
+    async function handleEnd(event) {
+      const op = operation;
+      if (!op || event.pointerId !== op.pointerId) return;
+      // Calculate final rotation from the release point, including quick drags.
+      if (op.mode === 'rotate' && op.moved) {
+        op.angle = normalizeAngle(op.initialAngle + Math.round((event.clientX - op.startX) / 10) * 15);
+      }
+      const changed = op.moved && (op.mode === 'move' || op.angle !== op.initialAngle);
+      const changes = op.mode === 'move'
+        ? getMapPercent(event.clientX, event.clientY)
+        : {rotation_deg: op.angle};
+      const payload = op.mode === 'move'
+        ? {position_x: changes.x, position_y: changes.y}
+        : changes;
+      detach();
+      if (!changed) {
         dragInProgress = false;
         renderCars();
-        setTimeout(() => { dragging = false; }, 100);
+        window.setTimeout(() => { dragging = false; }, 120);
         return;
       }
       savingInProgress = true;
       try {
-        setStatus(mode === 'rotate' ? 'Drehung wird gespeichert...' : 'Position wird gespeichert...');
+        setStatus(op.mode === 'rotate' ? 'Drehung wird gespeichert...' : 'Position wird gespeichert...');
         await apiRequest(`cars?id=eq.${car.id}`, {
-          method:'PATCH', headers:{Prefer:'return=minimal'}, body:JSON.stringify(changes)
+          method: 'PATCH', headers: {Prefer: 'return=minimal'}, body: JSON.stringify(payload)
         });
-        Object.assign(car, changes);
+        Object.assign(car, payload);
         lastCarsSnapshot = '';
-        setStatus(mode === 'rotate' ? 'Drehung gespeichert.' : 'Position gespeichert.');
+        setStatus(op.mode === 'rotate' ? 'Drehung gespeichert.' : 'Position gespeichert.');
       } catch (error) {
         console.error(error);
-        alert((mode === 'rotate' ? 'Drehung' : 'Position') + ' konnte nicht gespeichert werden: ' + error.message);
+        alert((op.mode === 'rotate' ? 'Drehung' : 'Position') + ' konnte nicht gespeichert werden: ' + error.message);
       } finally {
         dragInProgress = false;
         savingInProgress = false;
         renderCars();
-        setTimeout(() => { dragging = false; }, 100);
+        window.setTimeout(() => { dragging = false; }, 120);
         void loadCars(true);
       }
-    });
+      event.preventDefault();
+    }
 
-    marker.addEventListener('pointercancel', () => {
-      marker.classList.remove('dragging', 'rotating');
+    function handleCancel(event) {
+      if (!operation || event.pointerId !== operation.pointerId) return;
+      detach();
       dragInProgress = false;
       dragging = false;
       renderCars();
-    });
+    }
   }
 
   /* КАРТОЧКА МАШИНЫ */
