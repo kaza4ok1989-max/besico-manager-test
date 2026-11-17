@@ -56,6 +56,7 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const [selectedPlanPlaceId, setSelectedPlanPlaceId] = useState('');
   const [branchPrintArea, setBranchPrintArea] = useState('all');
   const [branchPrintFree, setBranchPrintFree] = useState(true);
+  const [toolsOpen, setToolsOpen] = useState(true);
   const [quickBranchOpen, setQuickBranchOpen] = useState(false);
   const [quickBranchPlate, setQuickBranchPlate] = useState('');
   const [quickBranchPlaceId, setQuickBranchPlaceId] = useState('');
@@ -830,7 +831,7 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     </div>;
   }
 
-  return <section style={{ maxWidth: 1300 }}
+  return <section className="besico-branch-lager" style={{ width: '100%', maxWidth: 'none', minWidth: 0 }}
     onDragOver={event => {
       if (!draggedStockId || !planIsVerified) return;
       if (event.clientY < 100) window.scrollBy(0, -28);
@@ -838,6 +839,31 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     }}>
     <h1>Lagerplan · {standortName}</h1>
     <p style={{ color: '#64748b' }}>Jede Filiale verwaltet ihre eigenen Lager. Die vorhandenen Lager und Radsätze aus Glauchau bleiben unverändert.</p>
+    <style>{`
+      .besico-branch-lager .besico-branch-layout { display:grid; grid-template-columns: minmax(250px, 280px) minmax(0, 1fr); gap:14px; align-items:start; }
+      .besico-branch-lager .besico-branch-layout.tools-closed { grid-template-columns: minmax(0, 1fr); }
+      .besico-branch-lager .besico-tool-panel { min-width:0; max-height:calc(100vh - 32px); overflow-y:auto; position:sticky; top:12px; padding-right:3px; }
+      .besico-branch-lager .besico-tool-panel > div { padding:12px !important; margin-bottom:10px !important; }
+      .besico-branch-lager .besico-tool-panel h2 { font-size:15px; margin:0 0 9px !important; }
+      .besico-branch-lager .besico-tool-panel h3 { font-size:13px; margin:12px 0 8px; }
+      .besico-branch-lager .besico-tool-panel label { min-width:0; max-width:100%; }
+      .besico-branch-lager .besico-tool-panel input:not([type=checkbox]), .besico-branch-lager .besico-tool-panel select { max-width:100%; min-width:0; box-sizing:border-box; }
+      .besico-branch-lager .besico-tool-panel button { max-width:100%; white-space:normal; }
+      .besico-branch-lager .besico-main-panel { min-width:0; }
+      @media (max-width: 850px) {
+        .besico-branch-lager .besico-branch-layout { display:block; }
+        .besico-branch-lager .besico-tool-panel { position:static; max-height:none; overflow:visible; padding-right:0; margin-bottom:12px; }
+      }
+    `}</style>
+    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10, flexWrap:'wrap', margin:'0 0 10px' }}>
+      <button type="button" aria-expanded={toolsOpen} aria-controls="besico-branch-tools" onClick={() => setToolsOpen(value => !value)}
+        style={{ ...btn, background: toolsOpen ? '#e2e8f0' : '#12365a', color: toolsOpen ? '#12365a' : '#fff', display:'inline-flex', gap:7, alignItems:'center' }}>
+        {toolsOpen ? '◀ Werkzeuge ausblenden' : '▶ Werkzeuge anzeigen'}
+      </button>
+      <span style={{ color:'#64748b', fontSize:12 }}>Lagerplan · {selectedWarehouse?.name || standortName}</span>
+    </div>
+    <div className={'besico-branch-layout' + (toolsOpen ? '' : ' tools-closed')}>
+      <aside id="besico-branch-tools" className="besico-tool-panel" style={{ display: toolsOpen ? 'block' : 'none' }} aria-label="Lagerverwaltung Werkzeuge">
     <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Lager auswählen</h2>
       {loading ? <p>Lager werden geladen...</p> : <div role="group" aria-label={`Lager in ${standortName}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
@@ -852,52 +878,6 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
       {!loading && !availableWarehouses.length && !error && <p>Für diese Filiale wurde noch kein Lager angelegt.</p>}
       {selectedWarehouse && <p style={{ color: '#475569', marginBottom: 0 }}>Ausgewähltes Lager: <strong>{selectedWarehouse.name}</strong></p>}
     </div>
-    <div style={{ scrollMarginTop: 18 }} id="filiale-hinweise">
-      {branchStockError && <p role="alert" style={{ color: '#b91c1c', fontWeight: 700 }}>{branchStockError}</p>}
-      {stockError && <p role="alert" style={{ color: '#b91c1c', fontWeight: 700 }}>{stockError}</p>}
-      {stockMessage && <p role="status" style={{ color: '#166534', fontWeight: 700 }}>{stockMessage}</p>}
-      {physicalWarehouseSelected && <p style={{ color: '#475569', fontSize: 13 }}>
-        Ziel für die Einlagerung: <strong>{selectedWarehouse?.name}</strong>. Lager oben wechseln, um ein anderes Ziel zu wählen.
-      </p>}
-      {!planIsVerified && physicalWarehouseSelected && <p style={{ color: '#92400e', fontSize: 12 }}>
-        Platzbelegung wird geprüft. Bis alle Lagerplätze eindeutig erkannt sind, ist das Verschieben gesperrt.
-      </p>}
-      {unmatchedPlaces.length > 0 && <p role="alert" style={{ color: '#92400e', fontSize: 12 }}>
-        {unmatchedPlaces.length} gespeicherte Lagerplätze konnten nicht eindeutig einer Zelle zugeordnet werden. Bitte zuerst prüfen.
-      </p>}
-      {!slotNamesAreUnique && <p role="alert" style={{ color: '#b91c1c', fontSize: 12 }}>
-        Mehrere Lagerplätze haben dieselbe Bezeichnung. Zur Sicherheit ist das Verschieben gesperrt.
-      </p>}
-
-
-    </div>
-
-    {assignStock && <div id="filiale-platz-zuweisen" style={{ background: '#fff', border: '2px solid #2563eb', borderRadius: 12, padding: 16, marginBottom: 16 }}>
-      <h2 style={{ margin: '0 0 8px' }}>Lagerplatz zuweisen · {assignStock.kennzeichen || assignStock.belegnummer || 'Radsatz'}</h2>
-      <p style={{ fontSize: 13, color: '#64748b' }}>Aktuelles Lager: {availableWarehouses.find(item => item.id === assignStock.besico_lager_id)?.name || '—'} · Aktueller Platz: {assignStock.lagerplatz || 'Nicht zugeordnet'}</p>
-      <p style={{ fontSize: 13 }}>Ziel: <strong>{selectedWarehouse?.name || 'Bitte Lager wählen'}</strong>. Nur freie Plätze im ausgewählten Lager.</p>
-      {!physicalWarehouseSelected && <p style={{ color: '#92400e', fontSize: 13 }}>Bitte oben das Ziellager auswählen (nicht Wareneingang).</p>}
-      {!planIsVerified && physicalWarehouseSelected && <p style={{ color: '#92400e', fontSize: 13 }}>Lagerplätze werden geprüft. Zuordnung ist bis zur sicheren Prüfung gesperrt.</p>}
-      {planIsVerified && physicalWarehouseSelected && <div role="group" aria-label="Freier Lagerplatz" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 210px), 1fr))', gap: 6, maxHeight: 220, overflowY: 'auto', padding: 5, border: '1px solid #dbe3ee', borderRadius: 8, marginBottom: 12 }}>
-        {freeNewSlots.map(slot => <button type="button" key={slot.place.id}
-          disabled={stockWorking}
-          aria-pressed={assignPlaceId === slot.place.id}
-          onClick={() => { setAssignPlaceId(slot.place.id); setSelectedPlanPlaceId(slot.place.id); }}
-          style={{ ...btn, textAlign: 'left', padding: '8px 10px',
-            background: assignPlaceId === slot.place.id ? '#12365a' : '#dcfce7',
-            color: assignPlaceId === slot.place.id ? '#fff' : '#166534' }}>
-          {slot.label}
-        </button>)}
-        {!freeNewSlots.length && <p style={{ margin: 4, fontSize: 13 }}>Keine freien Lagerplätze vorhanden.</p>}
-      </div>}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <button type="button" style={{ ...btn, background: '#12365a', color: '#fff' }}
-          disabled={!assignPlaceId || !freeNewSlots.some(slot => slot.place.id === assignPlaceId) || stockWorking || !planIsVerified || !physicalWarehouseSelected}
-          onClick={() => void moveBranchStock(assignStock.id, assignPlaceId)}>Speichern</button>
-        <button type="button" style={btn} onClick={() => { setAssignStockId(''); setAssignPlaceId(''); }}>Abbrechen</button>
-      </div>
-    </div>}
-
     <div style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <button type="button" style={{ ...btn, display: 'inline-flex', alignItems: 'center', gap: 7,
         background: quickBranchOpen ? '#e2e8f0' : '#12365a', color: quickBranchOpen ? '#12365a' : '#fff' }}
@@ -1030,6 +1010,60 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
             </div>
           </div>}
         </>}
+      </>}
+    </div>}
+      </aside>
+      <div className="besico-main-panel">
+    <div style={{ scrollMarginTop: 18 }} id="filiale-hinweise">
+      {branchStockError && <p role="alert" style={{ color: '#b91c1c', fontWeight: 700 }}>{branchStockError}</p>}
+      {stockError && <p role="alert" style={{ color: '#b91c1c', fontWeight: 700 }}>{stockError}</p>}
+      {stockMessage && <p role="status" style={{ color: '#166534', fontWeight: 700 }}>{stockMessage}</p>}
+      {physicalWarehouseSelected && <p style={{ color: '#475569', fontSize: 13 }}>
+        Ziel für die Einlagerung: <strong>{selectedWarehouse?.name}</strong>. Lager oben wechseln, um ein anderes Ziel zu wählen.
+      </p>}
+      {!planIsVerified && physicalWarehouseSelected && <p style={{ color: '#92400e', fontSize: 12 }}>
+        Platzbelegung wird geprüft. Bis alle Lagerplätze eindeutig erkannt sind, ist das Verschieben gesperrt.
+      </p>}
+      {unmatchedPlaces.length > 0 && <p role="alert" style={{ color: '#92400e', fontSize: 12 }}>
+        {unmatchedPlaces.length} gespeicherte Lagerplätze konnten nicht eindeutig einer Zelle zugeordnet werden. Bitte zuerst prüfen.
+      </p>}
+      {!slotNamesAreUnique && <p role="alert" style={{ color: '#b91c1c', fontSize: 12 }}>
+        Mehrere Lagerplätze haben dieselbe Bezeichnung. Zur Sicherheit ist das Verschieben gesperrt.
+      </p>}
+
+
+    </div>
+
+    {assignStock && <div id="filiale-platz-zuweisen" style={{ background: '#fff', border: '2px solid #2563eb', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <h2 style={{ margin: '0 0 8px' }}>Lagerplatz zuweisen · {assignStock.kennzeichen || assignStock.belegnummer || 'Radsatz'}</h2>
+      <p style={{ fontSize: 13, color: '#64748b' }}>Aktuelles Lager: {availableWarehouses.find(item => item.id === assignStock.besico_lager_id)?.name || '—'} · Aktueller Platz: {assignStock.lagerplatz || 'Nicht zugeordnet'}</p>
+      <p style={{ fontSize: 13 }}>Ziel: <strong>{selectedWarehouse?.name || 'Bitte Lager wählen'}</strong>. Nur freie Plätze im ausgewählten Lager.</p>
+      {!physicalWarehouseSelected && <p style={{ color: '#92400e', fontSize: 13 }}>Bitte oben das Ziellager auswählen (nicht Wareneingang).</p>}
+      {!planIsVerified && physicalWarehouseSelected && <p style={{ color: '#92400e', fontSize: 13 }}>Lagerplätze werden geprüft. Zuordnung ist bis zur sicheren Prüfung gesperrt.</p>}
+      {planIsVerified && physicalWarehouseSelected && <div role="group" aria-label="Freier Lagerplatz" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 210px), 1fr))', gap: 6, maxHeight: 220, overflowY: 'auto', padding: 5, border: '1px solid #dbe3ee', borderRadius: 8, marginBottom: 12 }}>
+        {freeNewSlots.map(slot => <button type="button" key={slot.place.id}
+          disabled={stockWorking}
+          aria-pressed={assignPlaceId === slot.place.id}
+          onClick={() => { setAssignPlaceId(slot.place.id); setSelectedPlanPlaceId(slot.place.id); }}
+          style={{ ...btn, textAlign: 'left', padding: '8px 10px',
+            background: assignPlaceId === slot.place.id ? '#12365a' : '#dcfce7',
+            color: assignPlaceId === slot.place.id ? '#fff' : '#166534' }}>
+          {slot.label}
+        </button>)}
+        {!freeNewSlots.length && <p style={{ margin: 4, fontSize: 13 }}>Keine freien Lagerplätze vorhanden.</p>}
+      </div>}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button type="button" style={{ ...btn, background: '#12365a', color: '#fff' }}
+          disabled={!assignPlaceId || !freeNewSlots.some(slot => slot.place.id === assignPlaceId) || stockWorking || !planIsVerified || !physicalWarehouseSelected}
+          onClick={() => void moveBranchStock(assignStock.id, assignPlaceId)}>Speichern</button>
+        <button type="button" style={btn} onClick={() => { setAssignStockId(''); setAssignPlaceId(''); }}>Abbrechen</button>
+      </div>
+    </div>}
+
+    {selectedWarehouse && <div id="filiale-lagerplan" style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 12, marginBottom: 16 }}>
+      <h2 style={{ margin: '0 0 8px' }}>Lagerplan · {selectedWarehouse.name}</h2>
+      {structureLoading && <p>Lagerstruktur wird geladen...</p>}
+      {!structureLoading && <>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
           <h3>Übersicht der Lagerplätze</h3>
           <button type="button" style={btn} disabled={structureSaving} onClick={() => setStructureReload(n => n + 1)}><RefreshCw size={15} style={{ verticalAlign: 'middle' }} /> Aktualisieren</button>
@@ -1100,6 +1134,8 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
         </>}
       </>}
     </div>}
+      </div>
+    </div>
     <div id="filiale-radsaetze" style={{ background: '#fff', border: '1px solid #dbe3ee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Radsätze — unten · {standortName}</h2>
       <p style={{ color: '#475569', fontSize: 13 }}>
