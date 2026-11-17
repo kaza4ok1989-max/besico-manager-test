@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ChangeEvent, CSSProperties } from 'react';
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
@@ -6,6 +6,9 @@ import { supabase } from './supabase';
 
 type CellRow = Record<string, unknown>;
 type Kind = 'Fahrzeuge' | 'Radsaetze';
+type Standort = { id: string; name: string };
+const IMPORT_LAGER_NAME = 'Wareneingang (Excel)';
+
 const columns: Record<Kind, string[]> = {
   Fahrzeuge: ['kennzeichen', 'vin', 'marke', 'modell', 'kunde_name', 'kunde_telefon', 'bemerkung'],
   Radsaetze: ['belegnummer', 'kennzeichen', 'kundenname', 'fahrzeug', 'saison', 'lager', 'lagerplatz', 'erstellt_am'],
@@ -54,7 +57,7 @@ function downloadBlob(blob: Blob, name: string) {
 }
 
 export default function ExcelImportExport() {
-  const [kind, setKind] = useState<Kind>('Fahrzeuge');
+  const [kind, setKind] = useState<Kind>('Radsaetze');
   const [preview, setPreview] = useState<CellRow[]>([]);
   const [status, setStatus] = useState('');
   const [errors, setErrors] = useState<string[]>([]);
@@ -66,6 +69,70 @@ export default function ExcelImportExport() {
   const [reviewDecisions, setReviewDecisions] = useState<Record<number, ReviewDecision>>({});
   const [previewFilter, setPreviewFilter] = useState<PreviewFilter>('Alle');
   const [previewSearch, setPreviewSearch] = useState('');
+  // City is mandatory for tyre imports. A separate per-city incoming warehouse
+  // keeps the sets attributable to their branch until staff assign storage.
+  const [standorte, setStandorte] = useState<Standort[]>([]);
+  const [standortId, setStandortId] = useState('');
+  const [standortLoading, setStandortLoading] = useState(true);
+  const [standortError, setStandortError] = useState('');
+  const [previewStandortId, setPreviewStandortId] = useState('');
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const { data, error } = await supabase.from('besico_standorte')
+          .select('id,name').order('name');
+        if (error) throw error;
+        if (live) {
+          setStandorte((data || []) as Standort[]);
+          setStandortError('');
+        }
+      } catch (cause) {
+        if (live) setStandortError('Filialen konnten nicht geladen werden: ' +
+          (cause instanceof Error ? cause.message : String(cause)));
+      } finally {
+        if (live) setStandortLoading(false);
+      }
+    })();
+    return () => { live = false; };
+  }, []);
+
+  function resetImportPreview() {
+    setPreview([]); setChecks([]); setReviewDecisions({});
+    setPreviewFilter('Alle'); setPreviewSearch(''); setStatus('');
+    setErrors([]); setFilename(''); setLegacyImport(false);
+    setPreviewStandortId('');
+  }
+
+  // Read the target city and the warehouse back from Supabase before writing.
+  // There is no standort_id on reifenlager_scheine: its besico_lager_id must
+  // point to an actual warehouse belonging to the selected city.
+  async function ensureIncomingWarehouse(cityId: string): Promise<{ id: string; cityName: string }> {
+    const { data: city, error: cityError } = await supabase.from('besico_standorte')
+      .select('id,name').eq('id', cityId).single();
+    if (cityError || !city) throw cityError ?? new Error('Filiale nicht gefunden.');
+    const findWarehouse = () => supabase.from('besico_lager')
+      .select('id,standort_id,name')
+      .eq('standort_id', cityId).eq('name', IMPORT_LAGER_NAME).limit(1);
+    const found = await findWarehouse();
+    if (found.error) throw found.error;
+    if (found.data?.[0]) return { id: found.data[0].id, cityName: city.name };
+
+    const created = await supabase.from('besico_lager')
+      .insert({ standort_id: cityId, name: IMPORT_LAGER_NAME })
+      .select('id,standort_id,name').single();
+    if (!created.error && created.data) return { id: created.data.id, cityName: city.name };
+
+    // Another user may have created it just now (unique on standort_id,name).
+    if (created.error?.code === '23505') {
+      const retry = await findWarehouse();
+      if (retry.error) throw retry.error;
+      if (retry.data?.[0]) return { id: retry.data[0].id, cityName: city.name };
+    }
+    throw created.error ?? new Error('Wareneingang konnte nicht angelegt werden.');
+  }
+
 
   async function fetchData() {
     const [vehicles, receipts] = await Promise.all([
@@ -199,8 +266,14 @@ export default function ExcelImportExport() {
 
   async function chooseFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    setPreview([]); setChecks([]); setReviewDecisions({}); setPreviewFilter('Alle'); setPreviewSearch(''); setErrors([]); setStatus(''); setFilename(file?.name || ''); setLegacyImport(false);
+    resetImportPreview();
+    setFilename(file?.name || '');
     if (!file) return;
+    if (kind === 'Radsaetze' && (!standortId || !standorte.some(city => city.id === standortId))) {
+      setErrors(['Bitte zuerst die Zielfiliale auswählen. Es wurden keine Daten importiert.']);
+      event.target.value = '';
+      return;
+    }
     try {
       const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
       const preferred = kind === 'Fahrzeuge' ? 'Fahrzeuge' : 'Radsaetze';
@@ -217,6 +290,7 @@ export default function ExcelImportExport() {
       setChecking(true);
       const evaluated = await classifyRows(rows, kind);
       setChecks(evaluated);
+      setPreviewStandortId(kind === 'Radsaetze' ? standortId : '');
       setPreview(rows);
       setStatus(`${rows.length} Zeilen geprüft. Neu: ${evaluated.filter(x => x.state === 'Neu').length}; vorhanden: ${evaluated.filter(x => x.state === 'Bereits vorhanden').length}; manuell prüfen: ${evaluated.filter(x => x.state === 'Prüfen').length}. Noch nichts gespeichert.`);
     } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); }
@@ -282,9 +356,17 @@ export default function ExcelImportExport() {
 
   async function importExcel() {
     if (!preview.length || working || checking) return;
+    const cityId = standortId;
+    const chosenCity = standorte.find(city => city.id === cityId);
+    if (kind === 'Radsaetze' && (!chosenCity || previewStandortId !== cityId)) {
+      setErrors(['Zielfiliale fehlt oder wurde seit der Dateiprüfung geändert. Bitte Datei erneut auswählen.']);
+      return;
+    }
     setWorking(true); setErrors([]); setStatus('Datenbank wird erneut geprüft...');
     const issues: string[] = [];
     let added = 0, skipped = 0, review = 0;
+    let targetWarehouseId = '';
+    let targetCityName = '';
     try {
       // Always recheck immediately before writing, not only when the file was selected.
       const existing = await loadExisting(kind);
@@ -307,9 +389,20 @@ export default function ExcelImportExport() {
          setStatus(`Keine freigegebenen neuen Einträge. ${skippedCount} übersprungen, ${reviewCount} noch zu prüfen. Nichts gespeichert.`);
          return;
        }
-       if (!window.confirm(`${newCount} freigegebene Einträge importieren?\n${skippedCount} überspringen\n${reviewCount} unentschiedene Einträge NICHT importieren\nLagerplätze werden nicht übernommen.`)) {
+       const destinationInfo = kind === 'Radsaetze'
+         ? `\n\nZielfiliale: ${chosenCity?.name || 'NICHT GEWÄHLT'}\nZwischenlager: ${IMPORT_LAGER_NAME}\nKeine festen Lagerplätze zugewiesen.`
+         : '';
+       if (!window.confirm(`${newCount} freigegebene Einträge importieren?\n${skippedCount} überspringen\n${reviewCount} unentschiedene Einträge NICHT importieren\nLagerplätze werden nicht übernommen.${destinationInfo}`)) {
          setStatus('Import abgebrochen. Nichts gespeichert.');
          return;
+       }
+       // Create/reuse a dedicated incoming warehouse only after confirmation.
+       // Newly imported sets have no physical Lagerplatz, but already belong to
+       // the selected city through besico_lager_id.
+       if (kind === 'Radsaetze') {
+         const target = await ensureIncomingWarehouse(cityId);
+         targetWarehouseId = target.id;
+         targetCityName = target.cityName;
        }
       const accepted: CellRow[] = [];
       for (let i = 0; i < preview.length; i++) {
@@ -329,7 +422,13 @@ export default function ExcelImportExport() {
           else { added++; accepted.push(row); }
         } else {
           const number = text(row.belegnummer), plate = text(row.kennzeichen).toUpperCase();
-          const payload = { belegnummer: number, kennzeichen: plate, lager: '', lagerplatz: '', daten: {
+          if (!targetWarehouseId) throw new Error('Ziellager wurde nicht bestätigt. Import gestoppt.');
+          const payload = {
+            belegnummer: number, kennzeichen: plate, lager: '', lagerplatz: '',
+            besico_lager_id: targetWarehouseId,
+            daten: {
+            import_standort_id: cityId, import_standort_name: targetCityName,
+            import_eingang: true, import_zeitpunkt: new Date().toISOString(),
             kundenname: text(row.kundenname), fahrzeug: text(row.fahrzeug), saison: text(row.saison),
             reifengroesse: text(row.reifengroesse), reifenbezeichnung: text(row.reifenbezeichnung),
             fahrzeugstandort: text(row.fahrzeugstandort), bemerkung: text(row.bemerkung),
@@ -342,10 +441,15 @@ export default function ExcelImportExport() {
           else { added++; accepted.push(row); }
         }
       }
-      setStatus(`Fertig: ${added} importiert, ${skipped} Duplikate übersprungen, ${review} zur manuellen Prüfung, ${issues.length} Fehler.`);
+      setStatus(`Fertig: ${added} importiert${kind === 'Radsaetze' ? ` nach ${targetCityName} / ${IMPORT_LAGER_NAME} (ohne Lagerplatz)` : ''}, ${skipped} Duplikate übersprungen, ${review} zur manuellen Prüfung, ${issues.length} Fehler.${issues.length ? ' Teilimport möglich: bitte Ergebnis prüfen, Datei kann nach Korrektur erneut geprüft werden.' : ''}`);
       setErrors(issues);
-      setPreview([]); setChecks([]); setReviewDecisions({});
-    } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); setStatus('Import abgebrochen.'); }
+       if (!issues.length) { setPreview([]); setChecks([]); setReviewDecisions({}); setPreviewStandortId(''); }
+    } catch (e) {
+      setErrors([e instanceof Error ? e.message : String(e)]);
+      setStatus(added > 0
+        ? `Fehler nach ${added} bereits importierten Einträgen. Teilimport: bitte Daten prüfen, bevor die Datei erneut importiert wird.`
+        : 'Import abgebrochen. Keine Radsätze gespeichert.');
+    }
     finally { setWorking(false); }
   }
 
@@ -355,6 +459,8 @@ export default function ExcelImportExport() {
         .some(value => normalize(value).includes(normalize(previewSearch)))));
   const importCount = checks.filter((check, index) => check.state === 'Neu' || (check.state === 'Prüfen' && reviewDecisions[index] === 'import')).length;
   const unresolvedCount = checks.filter((check, index) => check.state === 'Prüfen' && !reviewDecisions[index]).length;
+  const selectedCity = standorte.find(city => city.id === standortId);
+  const readyForTyreImport = kind !== 'Radsaetze' || (!!selectedCity && previewStandortId === standortId);
 
   return <section style={{ maxWidth: 1100 }}>
     <h1>Excel Import / Export</h1>
@@ -372,11 +478,32 @@ export default function ExcelImportExport() {
     <div style={style}>
       <h2>Excel Import</h2>
       <p>Nur neue Datensätze. Bereits vorhandene Kennzeichen (Fahrzeuge) bzw. Belegnummern (Radsätze) werden übersprungen. Ähnliche Radsätze mit anderer Belegnummer werden zur manuellen Prüfung zurückgestellt. Radsätze werden ohne Lagerplatz importiert. Auch die alte Lagerliste mit Nr., Bereich, Lagerplatz usw. wird erkannt. Alte Lagerplätze werden nur als Information gespeichert und NICHT zugewiesen.</p>
-      <label style={{ display: 'block', marginBottom: 12 }}>Datenart: <select value={kind} disabled={working} onChange={e => { setKind(e.target.value as Kind); setPreview([]); setChecks([]); setReviewDecisions({}); setPreviewFilter('Alle'); setPreviewSearch(''); setStatus(''); setErrors([]); }} style={{ padding: 8, marginLeft: 8 }}><option value="Fahrzeuge">Fahrzeuge</option><option value="Radsaetze">Radsätze</option></select></label>
-      <input type="file" accept=".xlsx,.xls" disabled={working} onChange={e => void chooseFile(e)} aria-label="Excel-Datei auswählen" />
+      <label style={{ display: 'block', marginBottom: 12 }}>Datenart: <select value={kind} disabled={working || checking} onChange={e => { setKind(e.target.value as Kind); resetImportPreview(); }} style={{ padding: 8, marginLeft: 8 }}><option value="Fahrzeuge">Fahrzeuge</option><option value="Radsaetze">Radsätze</option></select></label>
+       {kind === 'Radsaetze' && <div style={{ border: '1px solid #cbd5e1', borderRadius: 10, padding: 14, marginBottom: 14, background: '#f8fafc' }}>
+         <label htmlFor="excel-ziel-standort" style={{ display: 'block', fontWeight: 700, marginBottom: 6 }}>1. Zielfiliale auswählen *</label>
+         <select id="excel-ziel-standort" aria-label="Zielfiliale auswählen" value={standortId}
+           disabled={working || checking || standortLoading || !!standortError}
+           onChange={event => { setStandortId(event.target.value); resetImportPreview(); }}
+           style={{ padding: 10, border: '1px solid #cbd5e1', borderRadius: 8, minWidth: 220, maxWidth: '100%' }}>
+           <option value="">Bitte Filiale auswählen</option>
+           {standorte.map(city => <option key={city.id} value={city.id}>{city.name}</option>)}
+         </select>
+         {standortLoading && <p style={{ fontSize: 13 }}>Filialen werden geladen...</p>}
+         {standortError && <p role="alert" style={{ color: '#b91c1c' }}>{standortError}</p>}
+         <p style={{ fontSize: 13, marginBottom: 0, color: '#475569' }}>
+           Die Radsätze werden zuerst der gewählten Filiale im separaten Lager „{IMPORT_LAGER_NAME}“ zugeordnet.
+           Ein physischer Lagerplatz wird beim Excel-Import <strong>nicht</strong> vergeben.
+           Die Zuordnung zu einem echten Lager und Lagerplatz wird als nächster Entwicklungsschritt ergänzt. Bereits vorhandene Glauchau-Radsätze bleiben unverändert.
+         </p>
+       </div>}
+       <label style={{ display: 'block', fontWeight: 700, marginBottom: 8 }}>{kind === 'Radsaetze' ? '2. Excel-Datei auswählen *' : 'Excel-Datei auswählen'} </label>
+      <input type="file" accept=".xlsx,.xls" disabled={working || checking || (kind === 'Radsaetze' && !selectedCity)} onChange={e => void chooseFile(e)} aria-label="Excel-Datei auswählen" />
+       {kind === 'Radsaetze' && selectedCity && <p style={{ fontSize: 13, color: '#12365a', fontWeight: 700 }}>
+         Importziel: {selectedCity.name} → {IMPORT_LAGER_NAME} → ohne Lagerplatz
+       </p>}
       {legacyImport && preview.length > 0 && <p style={{ color: '#92400e', fontWeight: 600 }}>Alte Lagerliste erkannt. Alle neuen Radsätze werden ohne Lagerplatz angelegt. Fehlende Kennzeichen erhalten die Kennung OHNE-KZ-...; bitte später prüfen.</p>}
       {preview.length > 0 && <>
-         <h3>Vorschau: {preview.length} Zeilen ({filename})</h3>
+          <h3>3. Import prüfen · Vorschau: {preview.length} Zeilen ({filename})</h3>
          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
            {(['Alle', 'Neu', 'Bereits vorhanden', 'Prüfen'] as PreviewFilter[]).map(filter => <button key={filter} type="button" onClick={() => setPreviewFilter(filter)} style={{ ...button, background: previewFilter === filter ? '#12365a' : '#fff', color: previewFilter === filter ? '#fff' : '#12365a', padding: '7px 10px' }}>
              {filter === 'Prüfen' ? 'Nur Prüfen' : filter} ({filter === 'Alle' ? preview.length : checks.filter(c => c.state === filter).length})
@@ -401,7 +528,7 @@ export default function ExcelImportExport() {
              </tr>)}</tbody>
            </table>
          </div>
-         <button type="button" disabled={working || checking || !importCount} style={button} onClick={() => void importExcel()}>{working ? 'Import läuft...' : `${importCount} freigegebene Einträge importieren`}</button>
+          <button type="button" disabled={working || checking || !importCount || !readyForTyreImport} style={button} onClick={() => void importExcel()}>{working ? 'Import läuft...' : `${importCount} freigegebene Einträge ${kind === 'Radsaetze' ? `nach ${selectedCity?.name || 'Filiale wählen'} importieren` : 'importieren'}`}</button>
          {unresolvedCount > 0 && <p style={{ color: '#92400e' }}>{unresolvedCount} ungeklärte Zeilen werden beim Import automatisch ausgelassen.</p>}
       </>}
     </div>
