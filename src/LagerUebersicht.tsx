@@ -1,3 +1,486 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, DragEvent } from 'react';
+import { supabase } from './supabase';
+import { RefreshCw, Search, MapPin, FileText, Plus, Trash2, GripVertical, Printer, ClipboardPlus } from 'lucide-react';
+
+type Schein = { id: string; belegnummer: string | null; kennzeichen: string; lager: string; lagerplatz: string; daten: Record<string, unknown> | null; erstellt_am: string; besico_lager_id: string | null };
+type WarehouseInfo = { id: string; standort_id: string; name: string };
+type LagerUebersichtProps = { view: 'Radsätze' | 'Lagerplan'; standortId: string; standortName: string };
+type Area = 'Zelt' | 'Lager';
+const btn: CSSProperties = { border: '1px solid #cbd5e1', background: '#fff', borderRadius: 8, padding: '9px 12px', cursor: 'pointer', color: '#12365a', fontWeight: 600 };
+const norm = (s: string | null | undefined) => (s ?? '').trim().toUpperCase().replace(/\s+/g, '');
+const searchNorm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+const field = (r: Schein, key: string) => String(r.daten?.[key] ?? '').trim();
+const qrUrl = (id: string) => `${window.location.origin}${import.meta.env.BASE_URL}?qr=${encodeURIComponent(id)}`;
+const keyOf = (area: string, place: string) => `${norm(area)}::${norm(place)}`;
+// Original locations imported from Excel are stored separately from current locations.
+const oldArea = (r: Schein) => field(r, 'bereich_alt');
+const oldPlace = (r: Schein) => field(r, 'lagerplatz_alt');
+const oldLocation = (r: Schein) => oldPlace(r).toUpperCase();
+
+
+export default function LagerUebersicht({ view, standortId, standortName }: LagerUebersichtProps) {
+  const [rows, setRows] = useState<Schein[]>([]);
+  // The existing Zelt/Lager layout belongs to Glauchau only. Other branches
+  // remain read-only until their own warehouse-place configuration is implemented.
+  const isLegacyGlauchau = standortName.trim().toLocaleLowerCase('de-DE') === 'glauchau';
+  const [warehouses, setWarehouses] = useState<WarehouseInfo[]>([]);
+  const [loadedStandortId, setLoadedStandortId] = useState('');
+  const [loadError, setLoadError] = useState('');
+  const refreshToken = useRef(0);
+  const [regale, setRegale] = useState<string[]>([]);
+  const [customPlaces, setCustomPlaces] = useState<string[]>([]);
+  const [busy, setBusy] = useState(true);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [query, setQuery] = useState('');
+  const [excelArea, setExcelArea] = useState('all');
+  const [excelRow, setExcelRow] = useState('all');
+  const [onlyUnassigned, setOnlyUnassigned] = useState(false);
+  const [lager, setLager] = useState<Area>('Zelt');
+  const [selected, setSelected] = useState<string | null>(null);
+  const [newRegal, setNewRegal] = useState('');
+  const [printArea, setPrintArea] = useState<Area>('Zelt');
+  const [printGroup, setPrintGroup] = useState('all');
+  const [printFree, setPrintFree] = useState(true);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [quickPlate, setQuickPlate] = useState('');
+  const [quickArea, setQuickArea] = useState<Area>('Zelt');
+  const [quickPlace, setQuickPlace] = useState('');
+  const [quickNote, setQuickNote] = useState('');
+  const [quickCreatedId, setQuickCreatedId] = useState<string | null>(null);
+  const [dragged, setDragged] = useState<string | null>(null);
+  const [hovered, setHovered] = useState<string | null>(null);
+  const [releaseHover, setReleaseHover] = useState(false);
+  const [assignId, setAssignId] = useState<string | null>(null);
+  const [assignArea, setAssignArea] = useState<Area>('Zelt');
+  const [assignPlace, setAssignPlace] = useState('');
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+
+  async function refresh() {
+    const token = ++refreshToken.current;
+    setBusy(true);
+    setLoadError('');
+    setError('');
+    setRows([]);
+    setRegale([]);
+    setCustomPlaces([]);
+    setWarehouses([]);
+    setLoadedStandortId('');
+    try {
+      if (!standortId || !isLegacyGlauchau) return;
+
+      // Only documented columns are used. Fail closed if branch mapping cannot
+      // be verified: showing all Radsätze here would mix the branches.
+      const { data: storageData, error: storageError } = await supabase
+        .from('besico_lager').select('id,standort_id,name').eq('standort_id', standortId);
+      if (token !== refreshToken.current) return;
+      if (storageError) throw new Error('Lagerzuordnung: ' + storageError.message);
+      const branchWarehouses = (storageData ?? []) as WarehouseInfo[];
+      const zeltWarehouse = branchWarehouses.find(w => norm(w.name) === 'ZELT');
+      const lagerWarehouse = branchWarehouses.find(w => norm(w.name) === 'LAGER');
+      if (!zeltWarehouse || !lagerWarehouse || zeltWarehouse.id === lagerWarehouse.id) {
+        throw new Error('Die Lager „Zelt“ und „Lager“ sind für Glauchau nicht eindeutig zugeordnet. Keine Änderungen möglich.');
+      }
+
+      const warehouseIds = [zeltWarehouse.id, lagerWarehouse.id];
+      const [scheine, shelves, custom] = await Promise.all([
+        supabase.from('reifenlager_scheine')
+          .select('id,belegnummer,kennzeichen,lager,lagerplatz,daten,erstellt_am,besico_lager_id')
+          .in('besico_lager_id', warehouseIds).order('erstellt_am', { ascending: false }),
+        supabase.from('reifenlager_regale').select('nummer').order('nummer'),
+        supabase.from('reifenlager_einzelplaetze').select('bezeichnung').order('bezeichnung'),
+      ]);
+      if (token !== refreshToken.current) return;
+      const problems = [scheine.error && `Radsätze: ${scheine.error.message}`, shelves.error && `Regale: ${shelves.error.message}`, custom.error && `Einzelplätze: ${custom.error.message}`].filter(Boolean);
+      if (problems.length) throw new Error(problems.join(' | '));
+      setWarehouses(branchWarehouses);
+      setRows((scheine.data ?? []) as Schein[]);
+      setRegale((shelves.data ?? []).map(r => String(r.nummer)));
+      setCustomPlaces((custom.data ?? []).map(r => String(r.bezeichnung)));
+      setLoadedStandortId(standortId);
+    } catch (e) {
+      if (token === refreshToken.current) {
+        setLoadError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      if (token === refreshToken.current) setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+    return () => { refreshToken.current += 1; };
+  }, [standortId, standortName]);
+  useEffect(() => { if (assignId) document.getElementById('lager-assign')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, [assignId]);
+  useEffect(() => {
+    if (!highlightedId) return;
+    // Wait until a cleared search filter has rendered the target card.
+    const scrollTimer = window.setTimeout(() => {
+      document.getElementById(`radsatz-card-${highlightedId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 80);
+    const clearTimer = window.setTimeout(() => setHighlightedId(null), 5000);
+    return () => { window.clearTimeout(scrollTimer); window.clearTimeout(clearTimer); };
+  }, [highlightedId]);
+
+  const occupied = useMemo(() => {
+    const map = new Map<string, Schein[]>();
+    for (const r of rows) {
+      if (!r.lagerplatz?.trim()) continue;
+      const key = keyOf(r.lager, r.lagerplatz);
+      map.set(key, [...(map.get(key) ?? []), r]);
+    }
+    return map;
+  }, [rows]);
+  const at = (place: string, area: Area = lager) => occupied.get(keyOf(area, place)) ?? [];
+  const excelAreas = [...new Set(rows.map(oldArea).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'de', { numeric: true }));
+  const excelLocations = [...new Set(rows.filter(r => excelArea === 'all' || oldArea(r) === excelArea).map(oldLocation).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'de', { numeric: true }));
+  const filtered = rows.filter(r => {
+    const values = [r.kennzeichen, r.belegnummer, r.lager, r.lagerplatz, ...Object.values(r.daten ?? {}).filter(v => typeof v === 'string')];
+    const words = query.trim().split(/\s+/).filter(Boolean);
+    const combined = searchNorm(values.join(' '));
+    if (!words.every(word => combined.includes(searchNorm(word)))) return false;
+    if (excelArea !== 'all' && oldArea(r) !== excelArea) return false;
+    if (excelRow !== 'all' && oldLocation(r) !== excelRow) return false;
+    if (onlyUnassigned && r.lagerplatz?.trim()) return false;
+    return true;
+  }).sort((a, b) => {
+    const areaCompare = oldArea(a).localeCompare(oldArea(b), 'de', { numeric: true });
+    if (areaCompare) return areaCompare;
+    const rowCompare = oldPlace(a).localeCompare(oldPlace(b), 'de', { numeric: true });
+    return rowCompare || (a.kennzeichen || '').localeCompare(b.kennzeichen || '', 'de', { numeric: true });
+  });
+  const selectedRows = selected ? at(selected) : [];
+  const customLevels = (name: string) => [`${name}-U`, `${name}-M`, `${name}-O`];
+  // Preserve any previously occupied legacy single slots until manually moved.
+  const legacyCustomPlaces = customPlaces.filter(name => at(name, 'Zelt').length > 0);
+  const rackPlaces = [...regale.flatMap(n => [0, 1, 2].map(i => `${n}0${i}`)), ...customPlaces.flatMap(customLevels), ...legacyCustomPlaces];
+  const warehousePlaces = Array.from({ length: 6 }, (_, r) => Array.from({ length: 6 }, (_, s) => [`R${r + 1}-${s + 1}-Unten`, `R${r + 1}-${s + 1}-Oben`])).flat(2);
+  const printGroups = printArea === 'Zelt'
+    ? [...regale.map(name => ({ value: `standard:${name}`, label: `Regal ${name}` })), ...customPlaces.map(name => ({ value: `custom:${name}`, label: `Regal ${name}` }))]
+    : Array.from({ length: 6 }, (_, i) => ({ value: `row:${i + 1}`, label: `Reihe ${i + 1}` }));
+
+  function printList() {
+    const validGroup = printGroups.some(g => g.value === printGroup) ? printGroup : 'all';
+    const positions: { place: string; level: string; group: string }[] = [];
+    if (printArea === 'Zelt') {
+      for (const name of regale) {
+        if (validGroup !== 'all' && validGroup !== `standard:${name}`) continue;
+        for (const [index, level] of ['Oben', 'Mitte', 'Unten'].entries()) {
+          positions.push({ place: `${name}0${2 - index}`, level, group: `Regal ${name}` });
+        }
+      }
+      for (const name of customPlaces) {
+        if (validGroup !== 'all' && validGroup !== `custom:${name}`) continue;
+        for (const [index, level] of ['Oben', 'Mitte', 'Unten'].entries()) {
+          positions.push({ place: `${name}-${['O', 'M', 'U'][index]}`, level, group: `Regal ${name}` });
+        }
+        if (legacyCustomPlaces.includes(name)) positions.push({ place: name, level: 'Alter Einzelplatz', group: `Regal ${name}` });
+      }
+    } else {
+      for (let row = 1; row <= 6; row++) {
+        if (validGroup !== 'all' && validGroup !== `row:${row}`) continue;
+        for (let stack = 1; stack <= 6; stack++) {
+          for (const level of ['Oben', 'Unten']) {
+            positions.push({ place: `R${row}-${stack}-${level}`, level, group: `Reihe ${row} / Stapel ${stack}` });
+          }
+        }
+      }
+    }
+    const printable = positions.flatMap(position => {
+      const sets = at(position.place, printArea);
+      if (!sets.length) return printFree ? [{ ...position, plate: 'Frei', receipt: '' }] : [];
+      return sets.map(set => ({ ...position, plate: set.kennzeichen || 'Ohne Kennzeichen', receipt: set.belegnummer || '' }));
+    });
+    const esc = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const groupLabel = printGroups.find(g => g.value === validGroup)?.label ?? (printArea === 'Zelt' ? 'Alle Regale' : 'Alle Reihen');
+    const now = new Date().toLocaleString('de-DE');
+    const tableRows = printable.map(item => `<tr><td>${esc(item.group)}</td><td>${esc(item.level)}</td><td>${esc(item.place)}</td><td>${esc(item.plate)}</td><td>${esc(item.receipt)}</td><td class="check">&#9633;</td></tr>`).join('');
+    const popup = window.open('', '_blank');
+    if (!popup) { setError('Druckfenster wurde blockiert. Bitte Pop-ups für BESICO erlauben.'); return; }
+    popup.document.open();
+    popup.document.write(`<!doctype html><html lang="de"><head><meta charset="utf-8"><title>BESICO Lagerliste - ${esc(printArea)} - ${esc(groupLabel)}</title><style>
+      body{font:12px Arial,sans-serif;color:#182b44;margin:24px}h1{font-size:20px;margin:0 0 5px}h2{font-size:15px;margin:0 0 15px}.meta{color:#555;margin-bottom:18px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #9aa8b9;padding:7px;text-align:left}th{background:#eaf0f7}.check{text-align:center;font-size:19px;width:55px}tr{break-inside:avoid}thead{display:table-header-group}.actions{margin-bottom:20px}button{padding:9px 15px;cursor:pointer}@media print{.actions{display:none}body{margin:0}@page{size:A4;margin:12mm}}
+    </style></head><body><div class="actions"><button onclick="window.print()">Drucken</button></div><h1>BESICO REIFENLAGER</h1><h2>Lagerliste · ${esc(printArea)} · ${esc(groupLabel)}</h2><div class="meta">Erstellt: ${esc(now)} · ${printable.length} Zeilen · ${printFree ? 'inkl. freier Plätze' : 'nur belegte Plätze'}</div><table><thead><tr><th>Regal / Reihe</th><th>Ebene</th><th>Lagerplatz</th><th>Kennzeichen</th><th>Beleg</th><th>Kontrolle</th></tr></thead><tbody>${tableRows || '<tr><td colspan="6">Keine belegten Lagerplätze gefunden.</td></tr>'}</tbody></table></body></html>`);
+    popup.document.close();
+    popup.focus();
+  }
+  const warehouseFor = (area: Area) => warehouses.find(w => norm(w.name) === norm(area));
+  const currentId = dragged;
+  const activeDrag = rows.find(r => r.id === currentId);
+
+  async function quickAdd() {
+    const plate = quickPlate.trim().replace(/\s+/g, ' ').toUpperCase();
+    if (!plate || plate.length > 32) { setError('Kennzeichen: bitte 1–32 Zeichen eingeben.'); return; }
+    if (!quickPlace) { setError('Bitte einen freien Lagerplatz auswählen.'); return; }
+    if (working || busy || loadedStandortId !== standortId) return;
+    const destinationWarehouse = warehouseFor(quickArea);
+    if (!destinationWarehouse) { setError('Lagerzuordnung fehlt. Schnellaufnahme nicht möglich.'); return; }
+    setWorking(true); setError(''); setMessage(''); setQuickCreatedId(null);
+    try {
+      // Recheck against the database immediately before inserting; stale UI must not decide availability.
+      const { data: latest, error: readError } = await supabase.from('reifenlager_scheine')
+        .select('id,kennzeichen,lager,lagerplatz,besico_lager_id');
+      if (readError) throw readError;
+      const existing = latest ?? [];
+      const samePlate = existing.filter(r => searchNorm(String(r.kennzeichen ?? '')) === searchNorm(plate));
+      if (samePlate.length && !window.confirm(`Kennzeichen ${plate} ist bereits ${samePlate.length}× gespeichert. Trotzdem einen weiteren Radsatz anlegen?`)) return;
+      if (existing.some(r => r.besico_lager_id === destinationWarehouse.id && norm(r.lagerplatz) === norm(quickPlace))) {
+        throw new Error('Lagerplatz ist inzwischen belegt. Bitte aktualisieren und anderen Platz wählen.');
+      }
+      if (!(quickArea === 'Zelt' ? rackPlaces : warehousePlaces).includes(quickPlace)) {
+        throw new Error('Ungültiger Lagerplatz.');
+      }
+      const receipt = `SCHNELL-${crypto.randomUUID().slice(0, 12).toUpperCase()}`;
+      const payload = {
+        kennzeichen: plate, belegnummer: receipt, lager: quickArea, lagerplatz: quickPlace, besico_lager_id: destinationWarehouse.id,
+        daten: {
+          belegnummer: receipt, kennzeichen: plate, lager: quickArea, lagerplatz: quickPlace,
+          bemerkung: quickNote.trim(), schnellaufnahme: true, status: 'Unvollständig',
+          datum: new Date().toISOString().slice(0, 10)
+        }
+      };
+      const { data: created, error: insertError } = await supabase.from('reifenlager_scheine')
+        .insert(payload).select('id').single();
+      if (insertError || !created) throw insertError ?? new Error('Speichern fehlgeschlagen.');
+      setQuickCreatedId(created.id);
+      setMessage(`${plate} → ${quickArea} / ${quickPlace} als Schnellaufnahme gespeichert.`);
+      setQuickPlate(''); setQuickNote(''); setQuickPlace('');
+      setLager(quickArea); setSelected(payload.lagerplatz);
+      await refresh();
+    } catch (e) {
+      setError('Schnellaufnahme: ' + (e instanceof Error ? e.message : String(e)));
+    } finally { setWorking(false); }
+  }
+
+  async function addRegal() {
+    const name = newRegal.trim().replace(/\s+/g, ' ');
+    if (!name || name.length > 54) { setError('Regalname: bitte 1–54 Zeichen eingeben.'); return; }
+    if (!/^[\p{L}\p{N} _./-]+$/u.test(name)) { setError('Regalname: nur Buchstaben, Zahlen, Leerzeichen, /, -, _ und Punkt verwenden.'); return; }
+    if (regale.some(n => norm(n) === norm(name)) || customPlaces.some(n => norm(n) === norm(name))) { setError('Dieses Regal existiert bereits.'); return; }
+    const places = /^\d{4}$/.test(name) ? [0, 1, 2].map(i => `${name}0${i}`) : [`${name}-U`, `${name}-M`, `${name}-O`];
+    if (places.some(p => rackPlaces.some(existing => norm(existing) === norm(p)) || at(p, 'Zelt').length > 0)) {
+      setError('Ein Lagerplatz mit diesem Namen ist bereits vorhanden.'); return;
+    }
+    setWorking(true); setError(''); setMessage('');
+    const { error: e } = /^\d{4}$/.test(name)
+      ? await supabase.from('reifenlager_regale').insert({ nummer: name })
+      : await supabase.from('reifenlager_einzelplaetze').insert({ bezeichnung: name });
+    if (e) setError('Regal hinzufügen: ' + e.message);
+    else { setNewRegal(''); setMessage(`Regal ${name} mit 3 Ebenen hinzugefügt.`); await refresh(); }
+    setWorking(false);
+  }
+
+  async function deleteCustomRegal(name: string) {
+    const places = [name, ...customLevels(name)];
+    if (places.some(p => at(p, 'Zelt').length > 0)) { setError(`Regal ${name} ist belegt. Zuerst die Radsätze verschieben.`); return; }
+    if (!window.confirm(`Regal ${name} wirklich löschen?`)) return;
+    setWorking(true); setError(''); setMessage('');
+    const { error: e } = await supabase.from('reifenlager_einzelplaetze').delete().eq('bezeichnung', name);
+    if (e) setError('Regal löschen: ' + e.message);
+    else { setSelected(null); setMessage(`Regal ${name} gelöscht.`); await refresh(); }
+    setWorking(false);
+  }
+
+  async function deleteRegal(nummer: string) {
+    const places = [0, 1, 2].map(i => `${nummer}0${i}`);
+    if (rows.some(r => norm(r.lager) === 'ZELT' && places.some(p => norm(p) === norm(r.lagerplatz)))) {
+      setError(`Regal ${nummer} ist belegt. Zuerst die Lagerplätze freigeben oder Radsätze verschieben.`); return;
+    }
+    if (!window.confirm(`Regal ${nummer} wirklich löschen?`)) return;
+    setWorking(true); setError(''); setMessage('');
+    const { error: e } = await supabase.from('reifenlager_regale').delete().eq('nummer', nummer);
+    if (e) setError('Regal löschen: ' + e.message);
+    else { setMessage(`Regal ${nummer} gelöscht.`); setSelected(null); await refresh(); }
+    setWorking(false);
+  }
+
+  async function moveTo(id: string, place: string, destination: Area = lager) {
+    if (working || busy || loadedStandortId !== standortId) return;
+    const source = rows.find(r => r.id === id);
+    if (!source) { setError('Radsatz nicht gefunden. Bitte aktualisieren.'); return; }
+    const destinationWarehouse = warehouseFor(destination);
+    if (!destinationWarehouse) { setError('Lagerzuordnung fehlt. Keine Änderung möglich.'); return; }
+    if (source.besico_lager_id !== destinationWarehouse.id) {
+      setError('Wechsel zwischen Zelt und Lager vorübergehend gesperrt: Die vorhandene Datenbankfunktion muss erst auf besico_lager_id geprüft werden.');
+      return;
+    }
+    if (!(destination === 'Zelt' ? rackPlaces : warehousePlaces).some(p => norm(p) === norm(place))) { setError('Ungültiger Lagerplatz.'); return; }
+    if (at(place, destination).some(r => r.id !== id)) { setError('Dieser Lagerplatz ist bereits belegt! Zuerst den vorhandenen Lagerplatz freigeben.'); return; }
+    if (keyOf(source.lager, source.lagerplatz) === keyOf(destination, place)) return;
+    setWorking(true); setError(''); setMessage('');
+    // Existing Glauchau-only movement path. The live RPC and index definitions
+    // have not yet been verified, so cross-warehouse moves are blocked above.
+    const isCustom = destination === 'Zelt' && customPlaces.some(name => customLevels(name).some(p => norm(p) === norm(place)) || (norm(name) === norm(place) && legacyCustomPlaces.includes(name)));
+    // Existing behavior: custom slots use a direct UPDATE. Database-level
+    // uniqueness still needs verification before enabling other branches.
+    const result = isCustom
+      ? await supabase.from('reifenlager_scheine').update({ lager: destination, lagerplatz: place }).eq('id', id).select('id')
+      : await supabase.rpc('reifenlager_platz_zuweisen', { p_schein_id: id, p_lager: destination, p_lagerplatz: place });
+    const e = result.error;
+    const notUpdated = isCustom && !('data' in result && result.data && result.data.length);
+    if (e) setError('Platz nicht gespeichert: ' + e.message + ' (Supabase-Berechtigungen prüfen)');
+    else if (notUpdated) setError('Platz nicht gespeichert: keine Berechtigung oder Datensatz nicht gefunden.');
+    else { setMessage(`${source.kennzeichen || 'Radsatz'} → ${destination} / ${place} gespeichert.`); setLager(destination); setSelected(place); setAssignId(null); setAssignPlace(''); }
+    await refresh();
+    setWorking(false);
+  }
+
+  // Clear only the position. The receipt, QR link and customer data stay intact.
+  // The UPDATE policy already installed for the admin allows this change.
+  async function releasePlace(id: string) {
+    if (working) return;
+    const source = rows.find(r => r.id === id);
+    if (!source) { setError('Radsatz nicht gefunden. Bitte aktualisieren.'); return; }
+    if (!source.lagerplatz?.trim()) { setMessage('Dieser Radsatz hat bereits keinen Lagerplatz.'); return; }
+    setWorking(true); setError(''); setMessage('');
+    const { data, error: e } = await supabase.from('reifenlager_scheine')
+      .update({ lagerplatz: '' }).eq('id', id).select('id');
+    if (e) setError('Platz konnte nicht freigegeben werden: ' + e.message);
+    else if (!data?.length) setError('Platz nicht freigegeben: Datensatz nicht gefunden oder keine Berechtigung.');
+    else {
+      setMessage(`${source.kennzeichen || 'Radsatz'}: Lagerplatz ${source.lagerplatz} freigegeben. Karte und Schein bleiben erhalten.`);
+      setSelected(null);
+      setRows(previous => previous.map(r => r.id === id ? { ...r, lagerplatz: '' } : r));
+    }
+    setWorking(false);
+  }
+
+  function onReleaseDragOver(event: DragEvent<HTMLDivElement>) {
+    if (!dragged || working) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    setReleaseHover(true);
+  }
+
+  function onReleaseDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const id = event.dataTransfer.getData('text/plain') || dragged;
+    setReleaseHover(false); setDragged(null); setHovered(null);
+    if (id) void releasePlace(id);
+  }
+
+  async function deleteSet(r: Schein) {
+    if (working) return;
+    if (!window.confirm(`Radsatz ${r.kennzeichen || r.belegnummer || r.id} und zugehörigen Einlagerungsschein endgültig löschen? Der Lagerplatz wird frei.`)) return;
+    setWorking(true); setError(''); setMessage('');
+    const { data, error: e } = await supabase.from('reifenlager_scheine').delete().eq('id', r.id).select('id');
+    if (e) setError('Radsatz löschen: ' + e.message);
+    else if (!data?.length) setError('Radsatz konnte nicht gelöscht werden. Bitte Berechtigungen in Supabase prüfen.');
+    else { setMessage('Radsatz gelöscht. Lagerplatz ist wieder frei.'); setSelected(null); }
+    await refresh();
+    setWorking(false);
+  }
+
+  function onDragStart(event: DragEvent<HTMLElement>, r: Schein) {
+    if (working) { event.preventDefault(); return; }
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', r.id);
+    setDragged(r.id);
+    setError('');
+  }
+  function autoScrollWhileDragging(event: DragEvent<HTMLElement>) {
+    if (!dragged || working) return;
+    const edge = 100;
+    const speed = 32;
+    if (event.clientY < edge) window.scrollBy(0, -speed);
+    else if (event.clientY > window.innerHeight - edge) window.scrollBy(0, speed);
+  }
+
+  function onDragEnd() { setDragged(null); setHovered(null); setReleaseHover(false); }
+  function onDragOver(event: DragEvent<HTMLButtonElement>, place: string) {
+    if (!dragged || working || at(place).some(r => r.id !== dragged)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    if (hovered !== place) setHovered(place);
+  }
+  function onDrop(event: DragEvent<HTMLButtonElement>, place: string) {
+    event.preventDefault();
+    const id = event.dataTransfer.getData('text/plain') || dragged;
+    setHovered(null); setDragged(null);
+    if (!id) return;
+    void moveTo(id, place);
+  }
+
+  function findCardForPlace(place: string) {
+    const matches = at(place);
+    if (!matches.length) return;
+    setSelected(place);
+    setQuery('');
+    setExcelArea('all');
+    setExcelRow('all');
+    setOnlyUnassigned(false);
+    setHighlightedId(matches[0].id);
+  }
+
+  function slot(place: string, label?: string) {
+    const here = at(place);
+    const count = here.length;
+    const blocked = count > 0 && here.some(r => r.id !== dragged);
+    const active = selected === place;
+    return <button key={place} type="button" draggable={count === 1 && !working} onDragStart={event => { if (count === 1) onDragStart(event, here[0]); }} onDragEnd={onDragEnd} onClick={() => setSelected(place)} onDoubleClick={() => findCardForPlace(place)}
+      onDragOver={event => onDragOver(event, place)} onDragLeave={() => setHovered(old => old === place ? null : old)} onDrop={event => onDrop(event, place)}
+      title={`${place}: ${count ? 'Doppelklick: Radsatzkarte unten finden · Drag & Drop zum Verschieben' : 'Frei — Radsatz hierher ziehen'}`}
+      style={{ width: '100%', border: hovered === place ? '3px dashed #2563eb' : active ? '3px solid #12365a' : '1px solid #cbd5e1', borderRadius: 8, padding: '8px 3px', background: count > 1 ? '#fed7aa' : count ? '#fecaca' : hovered === place ? '#bfdbfe' : '#dcfce7', color: '#172b4d', cursor: blocked ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: 12, minHeight: 42 }}>
+      <span style={{ display: 'block' }}>{label ?? place}</span>
+      <small>{count > 1 ? `${count} Einträge!` : count ? (here[0].kennzeichen || 'Belegt') : 'Frei'}</small>
+    </button>;
+  }
+
+  const assignRow = rows.find(r => r.id === assignId);
+  const assignPlaces = assignArea === 'Zelt' ? rackPlaces : warehousePlaces;
+  const freeAssignPlaces = assignPlaces.filter(p => !at(p, assignArea).some(r => r.id !== assignId));
+  const quickFreePlaces = (quickArea === 'Zelt' ? rackPlaces : warehousePlaces).filter(p => at(p, quickArea).length === 0);
+
+  function card(r: Schein) {
+    const isPlaced = r.lagerplatz?.trim() && (norm(r.lager) === 'ZELT' ? rackPlaces : warehousePlaces).some(p => norm(p) === norm(r.lagerplatz));
+    return <article key={r.id} id={`radsatz-card-${r.id}`} draggable={!working} onDragStart={e => onDragStart(e, r)} onDragEnd={onDragEnd}
+      style={{ background: highlightedId === r.id ? '#dbeafe' : '#fff', border: highlightedId === r.id ? '3px solid #2563eb' : '1px solid #dbe3ee', boxShadow: highlightedId === r.id ? '0 0 0 5px rgba(37,99,235,0.18)' : 'none', transition: 'background-color 250ms ease, border-color 250ms ease, box-shadow 250ms ease', borderRadius: 12, padding: 14, marginBottom: 10, cursor: working ? 'wait' : 'grab', opacity: dragged === r.id ? 0.5 : 1 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+        <strong style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><GripVertical size={17} color="#64748b" />{r.kennzeichen || 'Ohne Kennzeichen'}</strong>
+        <span style={{ fontSize: 12, color: isPlaced ? '#991b1b' : '#92400e' }}><MapPin size={13} style={{ verticalAlign: 'middle' }} /> {isPlaced ? `${r.lager} · ${r.lagerplatz}` : 'Nicht zugeordnet'}</span>
+      </div>
+      {(oldArea(r) || oldPlace(r)) && <p style={{ margin: '7px 0', fontSize: 12, color: '#1d4ed8', fontWeight: 700 }}>
+        Excel (alter Standort): {oldArea(r) || '—'}{oldPlace(r) ? ` · ${oldPlace(r)}` : ''}
+      </p>}
+      {r.daten?.schnellaufnahme === true && <p style={{ color: '#92400e', fontWeight: 700, fontSize: 12, margin: '6px 0' }}>Schnellaufnahme · Unvollständig</p>}
+      <p style={{ margin: '8px 0', fontSize: 13 }}>Beleg: {r.belegnummer || '—'} · {field(r, 'fahrzeug') || 'Fahrzeug unbekannt'} · {field(r, 'saison') || '—'}</p>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <a href={qrUrl(r.id)} style={{ ...btn, padding: '7px 9px', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12 }}><FileText size={15} /> Schein / QR</a>
+        <button type="button" style={{ ...btn, padding: '7px 9px', fontSize: 12 }} onClick={() => { setLager(norm(r.lager) === 'LAGER' ? 'Lager' : 'Zelt'); setSelected(r.lagerplatz); document.getElementById('lager-map')?.scrollIntoView({ behavior: 'smooth' }); }}>Platz anzeigen</button>
+        <button type="button" disabled={working} style={{ ...btn, padding: '7px 9px', fontSize: 12, color: '#1d4ed8' }} onClick={() => { const area: Area = norm(r.lager) === 'LAGER' ? 'Lager' : 'Zelt'; setAssignId(r.id); setAssignArea(area); setAssignPlace(''); setError(''); }}>Platz zuweisen</button>
+        {r.lagerplatz?.trim() && <button type="button" disabled={working} style={{ ...btn, padding: '7px 9px', color: '#166534', fontSize: 12 }} onClick={() => void releasePlace(r.id)}>Platz freigeben</button>}
+        <button type="button" disabled={working} style={{ ...btn, padding: '7px 9px', color: '#b91c1c', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 5 }} onClick={() => void deleteSet(r)}><Trash2 size={14} /> Löschen</button>
+      </div>
+    </article>;
+  }
+
+  if (!standortId || !standortName.trim()) {
+    return <section style={{ maxWidth: 1300 }}><h1>Lagerplan</h1><p>Standort wird geladen...</p></section>;
+  }
+  if (!isLegacyGlauchau) {
+    return <section style={{ maxWidth: 1300 }}>
+      <h1>Lagerplan · {standortName}</h1>
+      <p>Für diesen Standort wird ein eigener Lagerplan eingerichtet.</p>
+      <p style={{ color: '#64748b' }}>Die vorhandenen Regale und Radsätze aus Glauchau werden hier nicht angezeigt oder verändert. Neue Lagerplätze werden nach Prüfung der Datenbankstruktur freigeschaltet.</p>
+    </section>;
+  }
+  if (loadError) {
+    return <section style={{ maxWidth: 1300 }}>
+      <h1>Lagerplan · {standortName}</h1>
+      <p role="alert" style={{ color: '#b91c1c' }}>Lagerplan aus Sicherheitsgründen gesperrt: {loadError}</p>
+      <button type="button" style={btn} onClick={() => void refresh()}>Erneut versuchen</button>
+    </section>;
+  }
+  if (busy || loadedStandortId !== standortId) {
+    return <section style={{ maxWidth: 1300 }}><h1>Lagerplan · {standortName}</h1><p>Lagerdaten werden geladen...</p></section>;
+  }
+
+  return <section style={{ maxWidth: 1300 }} onDragOver={autoScrollWhileDragging}>
+    <h1>{view === 'Lagerplan' ? 'Lagerplan' : 'Radsätze'} · {standortName}</h1>
+    <p style={{ color: '#64748b' }}>Radsätze per Drag & Drop einlagern und wieder herausnehmen. Belegte Plätze können nicht überschrieben werden.</p>
     <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
       <label style={{ display: 'flex', gap: 8, alignItems: 'center', background: '#fff', padding: 10, borderRadius: 8, flex: '1 1 240px' }}><Search size={18} /><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Kennzeichen, Beleg, Lagerplatz..." style={{ border: 0, outline: 0, flex: 1, minWidth: 0 }} /></label>
       <button type="button" style={btn} disabled={working} onClick={() => void refresh()}><RefreshCw size={15} /> Aktualisieren</button>
