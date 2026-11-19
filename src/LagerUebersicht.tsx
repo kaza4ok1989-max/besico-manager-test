@@ -335,6 +335,84 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     }
   }
 
+  async function deleteWarehouse(warehouse: WarehouseInfo) {
+    if (loading || saving || structureSaving || stockWorking || branchStockLoading || structureLoading ||
+      structureReadFailed || branchStockError || warehouse.id !== selectedWarehouseId ||
+      warehouse.standort_id !== standortId) return;
+    if (warehouseWheelCount !== 0 || selectedWarehouseCount !== 0) {
+      setError(`Lager „${warehouse.name}“ enthält Radsätze oder seine Belegung ist nicht sicher geprüft. Bitte zuerst alle Radsätze in ein anderes Lager verlegen.`);
+      return;
+    }
+    if (!window.confirm(`Lager „${warehouse.name}“ in ${standortName} wirklich löschen?\n\nAuch alle LEEREN Reihen, Stapel und Lagerplätze dieses Lagers werden gelöscht.\n\nDiese Aktion kann nicht rückgängig gemacht werden. Radsätze werden niemals gelöscht.`)) return;
+    setSaving(true);
+    setError('');
+    setMessage('');
+    try {
+      // Re-check the exact branch / warehouse on the server, not only the cached UI.
+      const { data: current, error: currentError } = await supabase.from('besico_lager')
+        .select('id,standort_id,name').eq('id', warehouse.id).eq('standort_id', standortId).single();
+      if (currentError || !current) throw currentError ?? new Error('Lager nicht gefunden.');
+      await verifyEmptyWarehouse(warehouse.id);
+
+      // Read all child rows before modifying anything. Never touch another warehouse.
+      const childAreas: { id: string }[] = [];
+      for (let offset = 0; ; offset += 1000) {
+        const { data, error: readError } = await supabase.from('besico_lager_bereiche')
+          .select('id').eq('lager_id', warehouse.id).order('id').range(offset, offset + 999);
+        if (readError) throw readError;
+        childAreas.push(...(data ?? []));
+        if ((data ?? []).length < 1000) break;
+      }
+      const childPlaces: { id: string; bereich_id: string }[] = [];
+      for (let i = 0; i < childAreas.length; i += 25) {
+        const areaIds = childAreas.slice(i, i + 25).map(area => area.id);
+        for (let offset = 0; ; offset += 1000) {
+          const { data, error: readError } = await supabase.from('besico_lagerplaetze')
+            .select('id,bereich_id').in('bereich_id', areaIds).order('id').range(offset, offset + 999);
+          if (readError) throw readError;
+          childPlaces.push(...(data ?? []));
+          if ((data ?? []).length < 1000) break;
+        }
+      }
+      await verifyEmptyWarehouse(warehouse.id);
+      // Child records have to be removed first when foreign keys do not cascade.
+      // Confirm each deletion, including RLS-filtered cases returning no rows.
+      for (let i = 0; i < childPlaces.length; i += 50) {
+        const batch = childPlaces.slice(i, i + 50);
+        const ids = batch.map(place => place.id);
+        const { data: deleted, error: deleteError } = await supabase.from('besico_lagerplaetze')
+          .delete().in('id', ids).in('bereich_id', [...new Set(batch.map(place => place.bereich_id))]).select('id');
+        if (deleteError || deleted?.length !== ids.length) {
+          throw deleteError ?? new Error('Nicht alle Lagerplätze konnten gelöscht werden. Bitte Bestand aktualisieren.');
+        }
+      }
+      for (let i = 0; i < childAreas.length; i += 50) {
+        const ids = childAreas.slice(i, i + 50).map(area => area.id);
+        const { data: deleted, error: deleteError } = await supabase.from('besico_lager_bereiche')
+          .delete().eq('lager_id', warehouse.id).in('id', ids).select('id');
+        if (deleteError || deleted?.length !== ids.length) {
+          throw deleteError ?? new Error('Nicht alle Reihen konnten gelöscht werden. Bitte Bestand aktualisieren.');
+        }
+      }
+      await verifyEmptyWarehouse(warehouse.id);
+      const { data: deletedWarehouse, error: warehouseError } = await supabase.from('besico_lager')
+        .delete().eq('id', warehouse.id).eq('standort_id', standortId).select('id');
+      if (warehouseError || deletedWarehouse?.length !== 1) {
+        throw warehouseError ?? new Error('Lager konnte nicht gelöscht werden.');
+      }
+      setBranchWarehouses(previous => previous.filter(item => item.id !== warehouse.id));
+      setSelectedWarehouseId(previous => previous === warehouse.id
+        ? (availableWarehouses.find(item => item.id !== warehouse.id)?.id ?? '') : previous);
+      setMessage(`Lager „${warehouse.name}“ und seine leere Lagerstruktur wurden gelöscht.`);
+    } catch (cause) {
+      setError('Lager löschen: ' + (cause instanceof Error ? cause.message : String(cause)) +
+        ' Falls die Lagerstruktur teilweise entfernt wurde, bitte Seite aktualisieren. Radsätze wurden nicht gelöscht.');
+      setStructureReload(previous => previous + 1);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const selectedArea = areas.find(area => area.id === selectedAreaId && area.lager_id === selectedWarehouse?.id);
   const selectedAreaPlaces = selectedArea ? places.filter(place => place.bereich_id === selectedArea.id) : [];
   const layoutBusy = loading || saving || structureLoading || structureSaving || structureReadFailed || stockWorking;
@@ -933,7 +1011,18 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
         </button>)}
       </div>}
       {!loading && !availableWarehouses.length && !error && <p>Für diese Filiale wurde noch kein Lager angelegt.</p>}
-      {selectedWarehouse && <p style={{ color: '#475569', marginBottom: 0 }}>Ausgewähltes Lager: <strong>{selectedWarehouse.name}</strong></p>}
+      {selectedWarehouse && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginTop: 12 }}>
+        <span style={{ color: '#475569' }}>Ausgewähltes Lager: <strong>{selectedWarehouse.name}</strong></span>
+        <button type="button" title={warehouseWheelCount === 0 && selectedWarehouseCount === 0 ? 'Leeres Lager mit leerer Lagerstruktur löschen' : 'Nur vollständig leere Lager können gelöscht werden'}
+          disabled={loading || saving || structureSaving || stockWorking || branchStockLoading || structureLoading || structureReadFailed || !!branchStockError || warehouseWheelCount !== 0 || selectedWarehouseCount !== 0}
+          onClick={() => void deleteWarehouse(selectedWarehouse)}
+          style={{ ...btn, color: '#b91c1c', display: 'inline-flex', alignItems: 'center', gap: 5, padding: '7px 10px', opacity: warehouseWheelCount === 0 && selectedWarehouseCount === 0 ? 1 : 0.6 }}>
+          <Trash2 size={15} /> Lager löschen
+        </button>
+        {warehouseWheelCount !== null && warehouseWheelCount > 0 && <span style={{ fontSize: 12, color: '#92400e' }}>{warehouseWheelCount} Radsätze vorhanden — Löschen gesperrt</span>}
+      </div>}
+      {error && <p role="alert" style={{ color: '#b91c1c', fontSize: 13, marginBottom: 0 }}>{error}</p>}
+      {message && <p role="status" style={{ color: '#166534', fontSize: 13, marginBottom: 0 }}>{message}</p>}
     </div>
     </div>
     <div className={'besico-branch-layout' + (toolsOpen ? '' : ' tools-closed')}
