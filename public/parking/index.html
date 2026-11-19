@@ -140,6 +140,7 @@
     }
 
     .marker.admin { cursor: grab; }
+    .marker:focus:not(:focus-visible) { outline: none; }
     .marker.admin:active { cursor: grabbing; }
     .marker.rotating { z-index:1001; }
     .marker.rotating .carShape { transform:translate(-50%,-50%) rotate(var(--rotation,0deg)) scale(1) !important; }
@@ -2116,24 +2117,27 @@
   /* Normal: Linksklick öffnet die Karte, Ziehen bewegt das Auto.
      Nur solange die linke Maustaste AUF DEM AUTO gehalten wird:
      Pfeil links/rechts dreht um jeweils 15 Grad. */
-  window.addEventListener('keydown', event => {
+  function rotateHeldCarWithArrow(event) {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
     const held = heldCarForRotation;
-    if (!held || !isAdmin() || savingInProgress || placementMode || event.repeat) return;
-    // Die gehaltene Maustaste auf einem Auto hat Vorrang vor einem zuvor
-    // fokussierten Eingabefeld in der Fahrzeugkarte.
-    const { marker, car, operation } = held;
-    if (operation.moved || !(operation.mouseButtonHeld)) return;
+    if (!held || !isAdmin() || savingInProgress || placementMode) return;
+    const { marker, operation } = held;
+    if (operation.moved || !operation.mouseButtonHeld) return;
+    // Im eingebetteten Parkplatz können andere Tastatur-Handler das Ereignis
+    // abfangen. Deshalb die Pfeiltasten bereits in der Capture-Phase behandeln.
     event.preventDefault();
+    event.stopPropagation();
+    if (event.repeat) return; // Exakt 15 Grad pro physischem Tastendruck.
     operation.rotated = true;
-    dragging = true; // Nach Drehung keinen versehentlichen Klick/Karte öffnen.
+    dragging = true; // Nach Drehung keine Fahrzeugkarte versehentlich öffnen.
     const step = event.key === 'ArrowRight' ? 15 : -15;
     operation.newRotation = ((operation.newRotation + step) % 360 + 360) % 360;
     const shape = marker.querySelector('.carShape');
     if (shape) shape.style.setProperty('--rotation', operation.newRotation + 'deg');
     marker.classList.add('rotating');
     setStatus('Drehung: ' + operation.newRotation + '° · Beim Loslassen speichern');
-  });
+  }
+  document.addEventListener('keydown', rotateHeldCarWithArrow, true);
   function enableDrag(marker, car) {
     let operation = null;
 
@@ -2147,9 +2151,12 @@
       dragging = false;
       dragInProgress = true;
       // Tastaturfokus auf das Auto setzen, auch wenn zuvor ein Formular offen war.
-      marker.tabIndex = -1;
+      marker.tabIndex = 0;
       try { marker.focus({ preventScroll: true }); } catch (_) {}
       try { marker.setPointerCapture(event.pointerId); } catch (_) {}
+      if (event.pointerType === 'mouse') {
+        setStatus('Mouse 1 halten + Pfeil ← / → = 15° drehen · Maus bewegen = Auto verschieben');
+      }
       event.preventDefault();
     });
 
