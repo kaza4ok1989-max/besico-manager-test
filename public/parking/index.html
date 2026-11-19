@@ -139,8 +139,8 @@
       overflow: visible;
     }
 
-    .marker.admin { cursor: ew-resize; }
-    .marker.admin:active { cursor: ew-resize; }
+    .marker.admin { cursor: grab; }
+    .marker.admin:active { cursor: grabbing; }
     .marker.rotating { z-index:1001; }
     .marker.rotating .carShape { transform:translate(-50%,-50%) rotate(var(--rotation,0deg)) scale(1) !important; }
     .marker.rotating .carVin { top:calc(50% + 23px) !important; font-size:7px !important; }
@@ -721,9 +721,8 @@
 
 <!-- КАРТОЧКА МАШИНЫ -->
 <div id="card" class="panel">
-  <button id="closeCard" class="closeButton" type="button" title="Fenster schließen, Fahrzeug für Tastaturdrehung ausgewählt lassen">×</button>
+  <button id="closeCard" class="closeButton" type="button">×</button>
   <h2 id="cardTitle">Fahrzeug</h2>
-  <p id="rotationKeyboardHint" style="display:none;font-size:13px;color:#12365a;background:#eff6ff;padding:8px;border-radius:7px">Fahrzeug verschieben: mit linker Maustaste ziehen. Fahrzeug drehen: ← / → (je 15°).</p>
 
   <div class="formRow" id="editBranchRow" style="display:none">
     <label for="editBranch">Standort / Fahrzeug verlegen</label>
@@ -2112,33 +2111,25 @@
     );
   }
 
-  /* Fahrzeugbedienung: Ziehen mit der linken Maustaste verschiebt das Auto.
-     Drehung mit Pfeiltasten links/rechts bei ausgewähltem Fahrzeug.
-     Pointer Capture hält das Fahrzeug beim Ziehen auch außerhalb seines Symbols fest. */
+  /* Nur Bewegung der Fahrzeuge mit der linken Maustaste.
+     Klick öffnet die Fahrzeugkarte. Keine Drehung durch Maus oder Tastatur. */
   function enableDrag(marker, car) {
     let operation = null;
 
     marker.addEventListener('pointerdown', event => {
-      if (event.button !== 0 || !isAdmin() || placementMode || savingInProgress || operation) return;
-      if (event.pointerType === 'touch') return; // Finger scrollt die Karte.
-      operation = {
-        pointerId: event.pointerId,
-        x: event.clientX,
-        y: event.clientY,
-        moved: false,
-        startPosition: {x: Number(car.position_x), y: Number(car.position_y)}
-      };
-      selectedCar = car;
+      if (!isAdmin() || placementMode || savingInProgress || event.button !== 0 || operation) return;
+      if (event.pointerType === 'touch') return; // Karte auf Mobilgeräten scrollbar halten.
+      operation = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
       dragging = false;
       dragInProgress = true;
-      try { marker.setPointerCapture(event.pointerId); } catch (_) { /* Browser fallback */ }
+      try { marker.setPointerCapture(event.pointerId); } catch (_) {}
       event.preventDefault();
     });
 
     marker.addEventListener('pointermove', event => {
       const op = operation;
-      if (!op || op.pointerId !== event.pointerId) return;
-      if (!op.moved && Math.hypot(event.clientX - op.x, event.clientY - op.y) >= 3) {
+      if (!op || op.id !== event.pointerId) return;
+      if (!op.moved && Math.hypot(event.clientX - op.x, event.clientY - op.y) >= 6) {
         op.moved = true;
         dragging = true;
         marker.classList.add('dragging');
@@ -2153,43 +2144,48 @@
 
     marker.addEventListener('pointerup', async event => {
       const op = operation;
-      if (!op || event.pointerId !== op.pointerId) return;
+      if (!op || op.id !== event.pointerId) return;
       operation = null;
       try { if (marker.hasPointerCapture(event.pointerId)) marker.releasePointerCapture(event.pointerId); } catch (_) {}
       marker.classList.remove('dragging');
       if (!op.moved) {
+        // Pointer Capture / preventDefault kann das normale click-Ereignis verhindern.
+        // Die Karte daher direkt bei einem echten Klick öffnen.
         dragInProgress = false;
-        renderCars();
+        dragging = false;
+        showCar(car);
         return;
       }
       const pos = getMapPercent(event.clientX, event.clientY);
-      const payload = {position_x: pos.x, position_y: pos.y};
+      const previous = { x: car.position_x, y: car.position_y };
       savingInProgress = true;
       try {
         setStatus('Position wird gespeichert...');
         await apiRequest(`cars?id=eq.${car.id}`, {
-          method: 'PATCH',
-          headers: {Prefer: 'return=minimal'},
-          body: JSON.stringify(payload)
+          method: 'PATCH', headers: { Prefer: 'return=minimal' },
+          body: JSON.stringify({ position_x: pos.x, position_y: pos.y })
         });
-        Object.assign(car, payload);
+        car.position_x = pos.x;
+        car.position_y = pos.y;
         lastCarsSnapshot = '';
         setStatus('Position gespeichert.');
       } catch (error) {
         console.error(error);
+        car.position_x = previous.x;
+        car.position_y = previous.y;
         alert('Position konnte nicht gespeichert werden: ' + error.message);
       } finally {
         dragInProgress = false;
         savingInProgress = false;
         renderCars();
-        window.setTimeout(() => { dragging = false; }, 180);
+        window.setTimeout(() => { dragging = false; }, 200);
         void loadCars(true);
       }
       event.preventDefault();
     });
 
     marker.addEventListener('pointercancel', event => {
-      if (!operation || operation.pointerId !== event.pointerId) return;
+      if (!operation || operation.id !== event.pointerId) return;
       operation = null;
       marker.classList.remove('dragging');
       dragInProgress = false;
@@ -2249,9 +2245,7 @@
       car.mobile_url || "";
 
     const admin = isAdmin();
-    const canRotateOnMap = admin && (branchOf(car) === 1 || branchOf(car) === 8);
     $("rotationControls").style.display = "none";
-    $("rotationKeyboardHint").style.display = canRotateOnMap ? "block" : "none";
     $("rotationValue").textContent = `${Number(car.rotation_deg || 0)}°`;
 
     [
@@ -2281,56 +2275,8 @@
     card.style.display = "block";
   }
 
-  // Close the large details card without losing the selected vehicle.
-  // This keeps the parking map visible while rotating with the arrow keys.
   $("closeCard").addEventListener("click", () => {
     card.style.display = "none";
-    if (selectedCar && isAdmin() && (branchOf(selectedCar) === 1 || branchOf(selectedCar) === 8)) {
-      setStatus("Fahrzeug ausgewählt: " + (selectedCar.fahrnummer || selectedCar.vin5 || selectedCar.model || "Fahrzeug") + ". Mit linker Maustaste verschieben; mit ← / → um 15° drehen. Esc beendet die Auswahl.");
-    }
-  });
-
-  async function rotateSelectedCar(delta, reset = false) {
-    if (!isAdmin() || !selectedCar || savingInProgress) return;
-    const car = selectedCar;
-    const oldAngle = Number(car.rotation_deg || 0);
-    const angle = reset ? 0 : ((oldAngle + delta) % 360 + 360) % 360;
-    if (angle === oldAngle) return;
-    savingInProgress = true;
-    try {
-      await apiRequest(`cars?id=eq.${car.id}`, {
-        method: "PATCH", headers: {Prefer: "return=minimal"},
-        body: JSON.stringify({rotation_deg: angle})
-      });
-      car.rotation_deg = angle;
-      $("rotationValue").textContent = `${angle}°`;
-      lastCarsSnapshot = "";
-      renderCars();
-    } catch(error) { console.error(error); alert("Drehen fehlgeschlagen: " + error.message); }
-    finally { savingInProgress = false; }
-  }
-  $("rotateLeft").onclick = () => rotateSelectedCar(-15);
-  $("rotateRight").onclick = () => rotateSelectedCar(15);
-  $("rotateHalf").onclick = () => rotateSelectedCar(180);
-  $("rotateReset").onclick = () => rotateSelectedCar(0, true);
-
-  document.addEventListener("keydown", event => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
-    const target = event.target;
-    if (target instanceof Element && (target.closest("input, textarea, select, [contenteditable='true']") || target.closest("[role='textbox']"))) return;
-    if (!isAdmin() || !selectedCar) return;
-    if (branchOf(selectedCar) !== activeBranchId) return;
-    if (branchOf(selectedCar) !== 1 && branchOf(selectedCar) !== 8) return;
-    event.preventDefault();
-    void rotateSelectedCar(event.key === "ArrowLeft" ? -15 : 15);
-  });
-
-  document.addEventListener("keydown", event => {
-    if (event.key !== "Escape" || card.style.display === "block") return;
-    if (!selectedCar) return;
-    selectedCar = null;
-    setStatus("Fahrzeugauswahl beendet.");
   });
 
   /* СОХРАНЕНИЕ */
