@@ -46,6 +46,8 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
   const [branchStockError, setBranchStockError] = useState('');
   const [branchStockRefresh, setBranchStockRefresh] = useState(0);
   const [branchStockQuery, setBranchStockQuery] = useState('');
+  // Jump from a double-clicked occupied slot to its matching card below.
+  const [branchCardFocus, setBranchCardFocus] = useState<{ id: string; nonce: number } | null>(null);
   const [stockWorking, setStockWorking] = useState(false);
   const [stockMessage, setStockMessage] = useState('');
   const [stockError, setStockError] = useState('');
@@ -214,6 +216,23 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     const bIncoming = b.besico_lager_id === incomingWarehouse?.id ? 0 : 1;
     return aIncoming - bIncoming || b.erstellt_am.localeCompare(a.erstellt_am);
   });
+
+  // The list normally shows only its first 100 entries. Always include the
+  // requested set, even if it lies beyond that limit, and leave normal filtering intact.
+  const branchCardsToShow = filteredBranchStock.slice(0, 100);
+  if (branchCardFocus && !branchCardsToShow.some(item => item.id === branchCardFocus.id)) {
+    const target = filteredBranchStock.find(item => item.id === branchCardFocus.id);
+    if (target) branchCardsToShow.unshift(target);
+  }
+  useEffect(() => {
+    if (!branchCardFocus) return;
+    const id = branchCardFocus.id;
+    const scrollTimer = window.setTimeout(() => {
+      document.getElementById(`branch-radsatz-card-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 100);
+    const clearTimer = window.setTimeout(() => setBranchCardFocus(old => old?.nonce === branchCardFocus.nonce ? null : old), 6500);
+    return () => { window.clearTimeout(scrollTimer); window.clearTimeout(clearTimer); };
+  }, [branchCardFocus]);
 
   useEffect(() => {
     let active = true;
@@ -812,6 +831,12 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     window.setTimeout(() => document.getElementById('filiale-lagerplan')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80);
   }
 
+  function findBranchCardForPlace(item: BranchRadsatz) {
+    setBranchStockQuery('');
+    setSelectedPlanPlaceId('');
+    setBranchCardFocus(previous => ({ id: item.id, nonce: (previous?.nonce ?? 0) + 1 }));
+  }
+
   function placeTile(place: LagerPlatz) {
     const slot = newWarehouseSlots.find(item => item.place.id === place.id);
     const here = slot ? stockForPlace(slot.label) : [];
@@ -825,10 +850,11 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
     const canDragWheel = planIsVerified && physicalWarehouseSelected && !stockWorking &&
       !layoutBusy && here.length === 1;
     return <div key={place.id}
-      title={canDragWheel ? `${slot?.label || ''}: Radsatz auf einen freien Platz ziehen` : (slot?.label || `${place.ebene} / ${place.platz_nummer}`)}
+      title={here.length ? `${slot?.label || ''}: Doppelklick — Radsatz unten in der Liste finden; Ziehen — Radsatz verschieben` : (slot?.label || `${place.ebene} / ${place.platz_nummer}`)}
       draggable={canDragWheel}
       onDragStart={event => { if (canDragWheel) onBranchDragStart(event, here[0].id); else event.preventDefault(); }}
       onDragEnd={() => { setDraggedStockId(null); setDropHoverPlaceId(null); }}
+      onDoubleClick={() => { if (here.length) findBranchCardForPlace(here[0]); }}
       onDragOver={event => onBranchDragOver(event, place.id)}
       onDragLeave={() => setDropHoverPlaceId(old => old === place.id ? null : old)}
       onDrop={event => onBranchDrop(event, place.id)}
@@ -1218,15 +1244,18 @@ function StandortLagerEinrichtung({ standortId, standortName }: { standortId: st
         {visibleBranchStock.length === 0 && <p>Für diese Filiale wurden keine Radsätze gefunden. Bitte das Ergebnis unter „Excel Import / Export“ prüfen.</p>}
         {visibleBranchStock.length > 0 && filteredBranchStock.length === 0 && <p>Keine Radsätze für diesen Suchbegriff.</p>}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 270px), 1fr))', gap: 10 }}>
-          {filteredBranchStock.slice(0, 100).map(item => {
+          {branchCardsToShow.map(item => {
             const warehouse = availableWarehouses.find(entry => entry.id === item.besico_lager_id);
             const previousArea = String(item.daten?.bereich_alt ?? '').trim();
             const previousPlace = String(item.daten?.lagerplatz_alt ?? '').trim();
-            return <article key={item.id} draggable={!stockWorking && planIsVerified && physicalWarehouseSelected}
+            return <article key={item.id} id={`branch-radsatz-card-${item.id}`} draggable={!stockWorking && planIsVerified && physicalWarehouseSelected}
               onDragStart={event => onBranchDragStart(event, item.id)}
               onDragEnd={() => { setDraggedStockId(null); setDropHoverPlaceId(null); }}
-              style={{ border: assignStockId === item.id ? '2px solid #2563eb' : '1px solid #dbe3ee',
-                borderRadius: 10, padding: 12, background: '#f8fafc', cursor: planIsVerified && physicalWarehouseSelected ? 'grab' : 'default' }}>
+              style={{ border: branchCardFocus?.id === item.id ? '3px solid #2563eb' : assignStockId === item.id ? '2px solid #2563eb' : '1px solid #dbe3ee',
+                borderRadius: 10, padding: 12, background: branchCardFocus?.id === item.id ? '#dbeafe' : '#f8fafc',
+                boxShadow: branchCardFocus?.id === item.id ? '0 0 0 4px rgba(37,99,235,0.16)' : 'none',
+                transition: 'background-color 200ms ease, border-color 200ms ease',
+                cursor: planIsVerified && physicalWarehouseSelected ? 'grab' : 'default' }}>
               <strong style={{ color: '#12365a', display: 'inline-flex', alignItems: 'center', gap: 5 }}><GripVertical size={16} /> {item.kennzeichen || 'Ohne Kennzeichen'}</strong>
               <p style={{ margin: '7px 0', fontSize: 13 }}>Beleg: {item.belegnummer || '—'}</p>
               <p style={{ margin: '7px 0', fontSize: 13 }}>Lager: <strong>{warehouse?.name || 'Unbekannt'}</strong></p>
