@@ -542,6 +542,8 @@
       placeholder="VIN oder Fahrzeugnummer suchen"
     >
 
+    <select id="fahrzeugartFilter" aria-label="Fahrzeugart filtern"><option value="">Alle Fahrzeugarten</option><option value="Neuwagen">Neuwagen</option><option value="Tageszulassung">Tageszulassung</option><option value="Gebrauchtwagen">Gebrauchtwagen</option><option value="unassigned">Nicht zugeordnet</option></select>
+
     <select id="modelFilter">
       <option value="">Alle Modelle</option>
       <option value="Ford Puma">Ford Puma</option>
@@ -692,6 +694,8 @@
     </select>
   </div>
 
+  <div class="formRow"><label for="newFahrzeugart">Fahrzeugart</label><select id="newFahrzeugart" required><option value="">Bitte auswählen</option><option value="Neuwagen">Neuwagen</option><option value="Tageszulassung">Tageszulassung</option><option value="Gebrauchtwagen">Gebrauchtwagen</option></select></div>
+
   <div class="formRow">
     <label for="newColor">Farbe</label>
     <select id="newColor">
@@ -764,6 +768,8 @@
       <option value="Škoda">Škoda</option>
     </select>
   </div>
+
+  <div class="formRow"><label for="editFahrzeugart">Fahrzeugart</label><select id="editFahrzeugart"><option value="">Nicht zugeordnet</option><option value="Neuwagen">Neuwagen</option><option value="Tageszulassung">Tageszulassung</option><option value="Gebrauchtwagen">Gebrauchtwagen</option></select></div>
 
   <div class="formRow">
     <label for="editColor">Farbe</label>
@@ -1734,7 +1740,7 @@
         const state = batteryStateFromRecords(records);
         const row = {
           "Standort":branchName(car.branch_id ?? 1), "VIN (vollständig)":car.vin_full || "", "VIN (letzte 5)":car.vin5 || "",
-          "Fahrzeugnummer":car.fahrnummer || "", "Modell":car.model || "", "Farbe":car.color || "",
+          "Fahrzeugnummer":car.fahrnummer || "", "Modell":car.model || "", "Fahrzeugart":fahrzeugartName(car), "Farbe":car.color || "",
           "Fahrzeugstatus":excelYard(car.yard_status), "Letzte Prüfung":excelDate(last?.checked_at),
           "Nächste Prüfung":excelDate(state.next || last?.next_check_at),
           "Letzte Ruhespannung (V)":last?.resting_voltage ?? "", "Letztes Testergebnis":last?.tester_result || "",
@@ -1747,7 +1753,7 @@
         const car = carMap.get(Number(h.car_id));
         history.push({
           "Eintrag-ID":h.id, "Standort bei Vorgang":branchName(h.branch_id ?? car?.branch_id ?? 1), "VIN (vollständig)":car?.vin_full || "", "VIN (letzte 5)":car?.vin5 || "",
-          "Fahrzeugnummer":car?.fahrnummer || "", "Modell":car?.model || "",
+          "Fahrzeugnummer":car?.fahrnummer || "", "Modell":car?.model || "", "Fahrzeugart":car ? fahrzeugartName(car) : "",
           "Fahrzeugstatus":car ? excelYard(car.yard_status) : "Unbekannt",
           "Datum":excelDate(h.checked_at), "Vorgang":excelEvent(h.event_type),
           "Ruhespannung (V)":h.resting_voltage ?? "", "Testergebnis":h.tester_result || "",
@@ -1757,9 +1763,9 @@
       }
       const wb = XLSX.utils.book_new();
       const add = (name, rows, keys) => XLSX.utils.book_append_sheet(wb,excelSheet(rows,keys),name);
-      add("Fahrzeugübersicht",overview,["Standort","VIN (vollständig)","VIN (letzte 5)","Fahrzeugnummer","Modell","Farbe","Fahrzeugstatus","Letzte Prüfung","Nächste Prüfung","Letzte Ruhespannung (V)","Letztes Testergebnis","Batteriestatus","Anzahl Einträge"]);
-      add("Batteriehistorie",history,["Eintrag-ID","Standort bei Vorgang","VIN (vollständig)","VIN (letzte 5)","Fahrzeugnummer","Modell","Fahrzeugstatus","Datum","Vorgang","Ruhespannung (V)","Testergebnis","Nächste Prüfung","Notizen","Eintragsstatus","Stornogrund"]);
-      add("Fällige Prüfungen",due,["Standort","VIN (vollständig)","VIN (letzte 5)","Fahrzeugnummer","Modell","Farbe","Fahrzeugstatus","Letzte Prüfung","Nächste Prüfung","Letzte Ruhespannung (V)","Letztes Testergebnis","Batteriestatus","Anzahl Einträge"]);
+      add("Fahrzeugübersicht",overview,["Standort","VIN (vollständig)","VIN (letzte 5)","Fahrzeugnummer","Modell","Fahrzeugart","Farbe","Fahrzeugstatus","Letzte Prüfung","Nächste Prüfung","Letzte Ruhespannung (V)","Letztes Testergebnis","Batteriestatus","Anzahl Einträge"]);
+      add("Batteriehistorie",history,["Eintrag-ID","Standort bei Vorgang","VIN (vollständig)","VIN (letzte 5)","Fahrzeugnummer","Modell","Fahrzeugart","Fahrzeugstatus","Datum","Vorgang","Ruhespannung (V)","Testergebnis","Nächste Prüfung","Notizen","Eintragsstatus","Stornogrund"]);
+      add("Fällige Prüfungen",due,["Standort","VIN (vollständig)","VIN (letzte 5)","Fahrzeugnummer","Modell","Fahrzeugart","Farbe","Fahrzeugstatus","Letzte Prüfung","Nächste Prüfung","Letzte Ruhespannung (V)","Letztes Testergebnis","Batteriestatus","Anzahl Einträge"]);
       const auditExport = auditRows.map(a => ({
         "Protokoll-ID":a.id, "Eintrag-ID":a.battery_check_id,
         "Änderungszeitpunkt":a.changed_at || "", "Bearbeiter-ID":a.changed_by || "",
@@ -1937,6 +1943,8 @@
     return "#ffffff";
   }
 
+  const fahrzeugartName = car => car.fahrzeugart || "Nicht zugeordnet";
+
   function carMatches(car) {
     const q = $("search").value.trim().toLowerCase();
 
@@ -1944,10 +1952,14 @@
       car.vin5 || "",
       car.vin_full || "",
       car.fahrnummer || "",
-      car.model || ""
+      car.model || "",
+      fahrzeugartName(car)
     ].join(" ").toLowerCase();
 
     if (q && !text.includes(q)) return false;
+
+    const artFilter = $("fahrzeugartFilter").value;
+    if (artFilter && (artFilter === "unassigned" ? Boolean(car.fahrzeugart) : car.fahrzeugart !== artFilter)) return false;
 
     if (
       $("modelFilter").value &&
@@ -2039,7 +2051,7 @@
         visibleCount++;
         const row = document.createElement("div"); row.className = "branchCar";
         const btn = document.createElement("button"); btn.type = "button";
-        btn.textContent = `${car.model || "Fahrzeug"} · VIN ${car.vin_full || car.vin5 || "—"}`;
+        btn.textContent = `${car.model || "Fahrzeug"} · ${fahrzeugartName(car)} · VIN ${car.vin_full || car.vin5 || "—"}`;
         const small = document.createElement("small");
         small.textContent = `${car.fahrnummer || ""} · 🔋 ${isAdmin() ? batteryState(car).label : ""}`;
         btn.appendChild(small); btn.onclick = () => showCar(car);
@@ -2082,7 +2094,8 @@
       marker.title = [
         car.model || "",
         car.vin5 || "",
-        car.fahrnummer || ""
+        car.fahrnummer || "",
+        fahrzeugartName(car)
       ].filter(Boolean).join(" · ");
 
       if (!carMatches(car)) {
@@ -2301,6 +2314,7 @@
       car.fahrnummer || "";
 
     setSelectValue($("editModel"), car.model);
+    $("editFahrzeugart").value = car.fahrzeugart || "";
     fillBranchSelect($("editBranch"), branchOf(car));
     $("editBranchRow").style.display = isAdmin() ? "block" : "none";
     setSelectValue($("editColor"), car.color);
@@ -2317,6 +2331,7 @@
       "editVinFull",
       "editFahrnummer",
       "editModel",
+      "editFahrzeugart",
       "editColor",
       "editMobileUrl"
     ].forEach(id => {
@@ -2357,6 +2372,7 @@
         $("editFahrnummer").value.trim();
 
       const model = $("editModel").value;
+      const fahrzeugart = $("editFahrzeugart").value || null;
       const color = $("editColor").value;
 
       const mobileUrl =
@@ -2389,6 +2405,7 @@
               vin_full: vinFull || null,
               fahrnummer,
               model,
+              fahrzeugart,
               color,
               mobile_url: mobileUrl,
               branch_id: Number($("editBranch").value)
@@ -2401,6 +2418,7 @@
           vin_full: vinFull || null,
           fahrnummer,
           model,
+          fahrzeugart,
           color,
           mobile_url: mobileUrl,
           branch_id: Number($("editBranch").value)
@@ -2525,11 +2543,13 @@
 
       const newVinFull = $("newVinFull").value.trim().toUpperCase();
       if (newVinFull && !/^[A-HJ-NPR-Z0-9]{17}$/.test(newVinFull)) { alert("Vollständige VIN muss 17 Zeichen haben."); return; }
+      if (!$("newFahrzeugart").value) { alert("Bitte Fahrzeugart auswählen."); return; }
       pendingCar = {
         vin5: vin,
         vin_full: newVinFull || null,
         fahrnummer,
         model: $("newModel").value,
+        fahrzeugart: $("newFahrzeugart").value,
         color: $("newColor").value,
         mobile_url:
           $("newMobileUrl").value.trim()
@@ -2662,6 +2682,8 @@
     "input",
     renderCars
   );
+
+  $("fahrzeugartFilter").addEventListener("change", renderCars);
 
   $("modelFilter").addEventListener(
     "change",
