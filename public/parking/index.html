@@ -648,7 +648,7 @@
   <button id="closeExcelImport" class="closeButton" type="button">×</button>
   <h2>Excel Import · Fahrzeuge ohne Parkplatz</h2>
   <div class="formRow"><label for="excelImportBranch">Zielstandort</label><select id="excelImportBranch"></select></div>
-  <div class="formRow"><label for="excelImportFile">Excel-Datei (.xlsx, .xls)</label><input id="excelImportFile" type="file" accept=".xlsx,.xls" style="width:100%"></div>
+  <div class="formRow"><label for="excelImportFile">Excel- oder CSV-Datei (.xlsx, .xls, .csv)</label><input id="excelImportFile" type="file" accept=".xlsx,.xls,.csv,text/csv" style="width:100%"></div>
   <p style="font-size:13px;color:#475569">Nur neue Fahrzeuge. Keine Kartenposition, keine Änderung vorhandener Fahrzeuge. VIN und Fahrzeugnummer werden über alle Standorte einschließlich Archiv geprüft. Fahrzeugart bleibt ohne Angabe im Excel unzugeordnet.</p>
   <button id="excelImportPreview" class="primaryButton fullButton" type="button">Datei prüfen · Vorschau</button>
   <div id="excelImportSummary" style="white-space:pre-wrap;font-size:14px;margin:10px 0" aria-live="polite"></div>
@@ -1805,32 +1805,40 @@
   $("excelImportPreview").addEventListener("click", async () => {
     if (!isAdmin()) return;
     const file = $("excelImportFile").files?.[0];
-    if (!file) return alert("Bitte Excel-Datei auswählen.");
+    if (!file) return alert("Bitte Excel- oder CSV-Datei auswählen.");
     const button = $("excelImportPreview"); button.disabled = true;
     $("excelImportConfirm").disabled = true;
-    $("excelImportSummary").textContent = "Excel wird geprüft...";
+    $("excelImportSummary").textContent = "Datei wird geprüft...";
     try {
       await loadExcelLibrary();
-      const wb = XLSX.read(await file.arrayBuffer(), {type:"array", cellDates:false});
+      const wb = XLSX.read(await file.arrayBuffer(), {type:"array", cellDates:false, codepage:65001});
       let parsed = null;
       for (const sheetName of wb.SheetNames) {
         const grid = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {header:1, defval:"", raw:false});
-        const idx = grid.findIndex(row => row.some(c => ["fahrgestellnummerfin","vin","vinfull","vollständigevin"].includes(importHeader(c))) && row.some(c => ["kennnummer","fahrzeugnummer","fahrnummer"].includes(importHeader(c))));
+        const idx = grid.findIndex(row => row.some(c => ["fahrgestellnummerfin","fahrgestellnummer","vin","vinfull","vollständigevin"].includes(importHeader(c))) && row.some(c => ["kennnummer","fahrzeugnummer","fahrnummer","angebotsnummer"].includes(importHeader(c))));
         if (idx < 0) continue;
         const headers = grid[idx].map(importHeader);
         const find = (...names) => headers.findIndex(h => names.includes(h));
-        const vinIdx = find("fahrgestellnummerfin","vin","vinfull","vollständigevin");
-        const numIdx = find("kennnummer","fahrzeugnummer","fahrnummer");
-        const modelIdx = find("automarkemodell","modell","model","fahrzeugmodell");
+        const vinIdx = find("fahrgestellnummerfin","fahrgestellnummer","vin","vinfull","vollständigevin");
+        const numIdx = find("kennnummer","fahrzeugnummer","fahrnummer","angebotsnummer");
+        const modelIdx = find("automarkemodell","modell","model","fahrzeugmodell","herstellerzusatz");
         const artIdx = find("fahrzeugart");
+        const colorIdx = find("farbeaussen","farbe","color");
+        const branchIdx = find("standort");
+        const colors = {weiss:"White",weiß:"White",white:"White",schwarz:"Black",black:"Black",rot:"Red",red:"Red",orange:"Orange",gelb:"Yellow",yellow:"Yellow",grün:"Green",gruen:"Green",green:"Green",blau:"Blue",blue:"Blue",grau:"Gray",gray:"Gray",grey:"Gray",silber:"Silver",silver:"Silver"};
         const raw = grid.slice(idx+1).filter(r => r.some(c => importValue(c))).map(r => {
           const vin = importKey(r[vinIdx]);
           const art = artIdx < 0 ? "" : importValue(r[artIdx]);
-          return {vin_full:vin, vin5:vin.slice(-5), fahrnummer:importValue(r[numIdx]), model:excelModel(modelIdx < 0 ? "" : r[modelIdx]), fahrzeugart:["Neuwagen","Tageszulassung","Gebrauchtwagen"].includes(art) ? art : null};
+          const rawColor = colorIdx < 0 ? "" : importValue(r[colorIdx]).toLowerCase();
+          const color = Object.entries(colors).find(([name]) => rawColor === name || rawColor.startsWith(name+" "))?.[1] || "White";
+          const sourceBranch = branchIdx < 0 ? "" : importValue(r[branchIdx]);
+          return {vin_full:vin, vin5:vin.slice(-5), fahrnummer:importValue(r[numIdx]), model:excelModel(modelIdx < 0 ? "" : r[modelIdx]), fahrzeugart:["Neuwagen","Tageszulassung","Gebrauchtwagen"].includes(art) ? art : null, color, sourceBranch};
         });
         parsed = raw; break;
       }
-      if (!parsed) throw new Error("Spalten nicht gefunden. Benötigt: Kennnummer, Fahrgestellnummer (FIN), Automarke / Modell.");
+      if (!parsed) throw new Error("Spalten nicht gefunden. Benötigt: VIN/Fahrgestellnummer, Kennnummer/Angebotsnummer und Modell/Hersteller Zusatz.");
+      const sourceBranches = [...new Set(parsed.map(r => r.sourceBranch).filter(Boolean))];
+      if (sourceBranches.length && !confirm(`Die Datei enthält Standortangaben: ${sourceBranches.join(", ")}.\nAlle NEUEN Fahrzeuge werden dem ausgewählten Zielstandort ${branchName(Number($("excelImportBranch").value))} zugeordnet. Fortfahren?`)) return;
       if (parsed.length > 2000) throw new Error("Maximal 2000 Fahrzeuge pro Datei.");
       const existing = await fetchAllRows("cars","id.asc");
       importPreview = excelImportClassify(parsed, existing);
@@ -1860,7 +1868,7 @@
           await apiRequest("cars",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({
             vin5:row.vin5,vin_full:row.vin_full,fahrnummer:row.fahrnummer,model:row.model,
             fahrzeugart:row.fahrzeugart,branch_id:branch,position_x:null,position_y:null,
-            yard_status:"on_site",color:"White"
+            yard_status:"on_site",color:row.color || "White"
           })});
           added++; seenVins.add(importKey(row.vin_full)); seenNums.add(importKey(row.fahrnummer));
         } catch (error) {failed++;console.error("Import Fahrzeug:",row.fahrnummer,error);}
