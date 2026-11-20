@@ -630,6 +630,7 @@
   </div>
   <div id="chemnitzPhotoWrap" style="display:none;margin-bottom:12px"><img src="./chemnitz_karte.png" alt="FordStore Chemnitz" style="display:block;width:100%;height:auto;border-radius:10px;border:1px solid #cbd5e1"></div>
   <div id="branchList"></div>
+  <section id="offsiteSection" style="display:none;margin-top:14px;background:white;border:1px solid #cbd5e1;border-radius:10px;padding:12px"><h3>Fahrzeuge ohne Parkplatz</h3><div id="offsiteList"></div></section>
 </main>
 
 <!-- ВХОД АДМИНИСТРАТОРА -->
@@ -722,6 +723,7 @@
     <input id="newMobileUrl" type="url" placeholder="https://...">
   </div>
 
+  <button id="saveWithoutParkingButton" class="fullButton" type="button" style="background:#e0f2fe;color:#075985;font-weight:bold">Fahrzeug ohne Parkplatz speichern</button>
   <div class="panelActions">
     <button id="cancelAddButton" type="button">Abbrechen</button>
     <button id="placeCarButton" class="primaryButton" type="button">
@@ -2184,6 +2186,29 @@
     });
 
     if (!isMap && !visibleCount) $("branchList").textContent = "Keine Fahrzeuge an diesem Standort.";
+    // Fahrzeuge ohne Kartenposition bleiben sichtbar und auffindbar.
+    const offsite = cars.filter(car =>
+      (car.yard_status || "on_site") === "on_site" &&
+      branchOf(car) === activeBranchId &&
+      (car.position_x == null || car.position_y == null) &&
+      carMatches(car)
+    );
+    const offsiteSection = $("offsiteSection");
+    const offsiteList = $("offsiteList");
+    offsiteSection.style.display = offsite.length ? "block" : "none";
+    offsiteList.replaceChildren();
+    for (const car of offsite) {
+      const row = document.createElement("div");
+      row.className = "branchCar";
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = `${car.model || "Fahrzeug"} · ${fahrzeugartName(car)} · VIN ${car.vin_full || car.vin5 || "—"} · ${car.fahrnummer || ""}`;
+      btn.appendChild(priceBadge(car));
+      btn.addEventListener("click", () => showCar(car));
+      row.appendChild(btn);
+      offsiteList.appendChild(row);
+    }
+    if (isMap) visibleCount += offsite.length;
     renderBatterySummary();
     setStatus(
       visibleCount +
@@ -2590,6 +2615,44 @@
         "none";
     }
   );
+
+  $("saveWithoutParkingButton").addEventListener("click", async () => {
+    if (!isAdmin() || savingInProgress) return;
+    const vin = $("newVin").value.trim();
+    const fahrnummer = $("newFahrnummer").value.trim();
+    const vinFull = $("newVinFull").value.trim().toUpperCase();
+    const art = $("newFahrzeugart").value;
+    if (!vin || !fahrnummer) { alert("Bitte VIN und Fahrzeugnummer eingeben."); return; }
+    if (vinFull && !/^[A-HJ-NPR-Z0-9]{17}$/.test(vinFull)) {
+      alert("Vollständige VIN muss 17 Zeichen haben."); return;
+    }
+    if (!art) { alert("Bitte Fahrzeugart auswählen."); return; }
+    savingInProgress = true;
+    $("saveWithoutParkingButton").disabled = true;
+    try {
+      const payload = {
+        vin5: vin, vin_full: vinFull || null, fahrnummer,
+        model: $("newModel").value, fahrzeugart: art,
+        color: $("newColor").value, mobile_url: $("newMobileUrl").value.trim(),
+        branch_id: activeBranchId, position_x: null, position_y: null
+      };
+      await apiRequest("cars", {
+        method: "POST",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify(payload)
+      });
+      addPanel.style.display = "none";
+      for (const id of ["newVin","newVinFull","newFahrnummer","newMobileUrl"]) $(id).value = "";
+      await loadCars(true);
+      alert("Fahrzeug ohne Parkplatz gespeichert.");
+    } catch (error) {
+      console.error(error);
+      alert("Speichern fehlgeschlagen: " + error.message);
+    } finally {
+      savingInProgress = false;
+      $("saveWithoutParkingButton").disabled = false;
+    }
+  });
 
   $("placeCarButton").addEventListener(
     "click",
