@@ -603,6 +603,7 @@
     <button id="externalBatteryButton" type="button" style="display:none">🔋 Ladung ohne Parkplatz</button>
     <button id="archiveButton" type="button" style="display:none">Archiv</button>
     <button id="excelExportButton" type="button" style="display:none">📥 Excel exportieren</button>
+    <button id="excelImportButton" type="button" style="display:none">📤 Excel importieren</button>
     <button id="addCarButton" type="button">
       + Fahrzeug hinzufügen
     </button>
@@ -642,6 +643,18 @@
   <section id="offsiteSection" style="display:none;margin-top:14px;background:white;border:1px solid #cbd5e1;border-radius:10px;padding:12px"><h3>Fahrzeuge ohne Parkplatz</h3><div id="offsiteList"></div></section>
 </main>
 
+<!-- EXCEL IMPORT -->
+<div id="excelImportPanel" class="panel" style="top:35px;max-width:780px;width:calc(100% - 20px)">
+  <button id="closeExcelImport" class="closeButton" type="button">×</button>
+  <h2>Excel Import · Fahrzeuge ohne Parkplatz</h2>
+  <div class="formRow"><label for="excelImportBranch">Zielstandort</label><select id="excelImportBranch"></select></div>
+  <div class="formRow"><label for="excelImportFile">Excel-Datei (.xlsx, .xls)</label><input id="excelImportFile" type="file" accept=".xlsx,.xls" style="width:100%"></div>
+  <p style="font-size:13px;color:#475569">Nur neue Fahrzeuge. Keine Kartenposition, keine Änderung vorhandener Fahrzeuge. VIN und Fahrzeugnummer werden über alle Standorte einschließlich Archiv geprüft. Fahrzeugart bleibt ohne Angabe im Excel unzugeordnet.</p>
+  <button id="excelImportPreview" class="primaryButton fullButton" type="button">Datei prüfen · Vorschau</button>
+  <div id="excelImportSummary" style="white-space:pre-wrap;font-size:14px;margin:10px 0" aria-live="polite"></div>
+  <div id="excelImportRows" style="max-height:35vh;overflow:auto;font-size:12px"></div>
+  <button id="excelImportConfirm" class="primaryButton fullButton" type="button" disabled>Neue Fahrzeuge importieren</button>
+</div>
 <!-- ВХОД АДМИНИСТРАТОРА -->
 <div id="loginPanel" class="panel">
   <button id="closeLogin" class="closeButton" type="button">×</button>
@@ -964,6 +977,7 @@
       fillBranchSelect($("branchSelect"), activeBranchId);
       fillBranchSelect($("editBranch"), activeBranchId);
       fillBranchSelect($("externalBranch"), activeBranchId);
+      fillBranchSelect($("excelImportBranch"), activeBranchId);
     } catch (error) { console.error("Standorte laden:", error); }
   }
   let cars = [];
@@ -1014,6 +1028,7 @@
     loginPanel.style.display = "none";
     $("batteryPanel").style.display = "none";
     $("archivePanel").style.display = "none";
+    $("excelImportPanel").style.display = "none";
     $("externalBatteryPanel").style.display = "none";
     $("remindersPanel").style.display = "none";
   }
@@ -1045,6 +1060,7 @@
     $("externalBatteryButton").style.display = admin ? "inline-block" : "none";
     $("remindersButton").style.display = admin ? "inline-block" : "none";
     $("excelExportButton").style.display = admin ? "inline-block" : "none";
+    $("excelImportButton").style.display = admin ? "inline-block" : "none";
     $("batterySummary").style.display = admin ? "flex" : "none";
     if (!admin) { externalReminderEvents = []; batteryChecks = []; batteryLoaded = false; $("batteryFilter").value = ""; $("batteryPanel").style.display = "none"; $("archivePanel").style.display = "none"; }
     renderCars();
@@ -1729,6 +1745,135 @@
       document.head.appendChild(script);
     });
   }
+  // Excel-Import: Vorschau und globale Dublettenprüfung (auch Archiv).
+  let importPreview = [];
+  const importKey = v => String(v ?? "").trim().toUpperCase().replace(/[\s\-]/g, "");
+  const importHeader = v => String(v ?? "").trim().toLowerCase().replace(/[^a-z0-9äöüß]/g, "");
+  const importValue = v => String(v ?? "").trim();
+  function excelModel(raw) {
+    const text = importValue(raw);
+    if (!text) return "";
+    const names = Array.from($("newModel").options).map(o => o.value);
+    const match = names.find(n => importKey(n) === importKey(text));
+    return match || text; // Modelle aus Excel nicht verlieren.
+  }
+  function excelImportClassify(rows, existing) {
+    const vins = new Set(), numbers = new Set();
+    for (const c of existing) {
+      if (c.vin_full) vins.add(importKey(c.vin_full));
+      if (c.fahrnummer) numbers.add(importKey(c.fahrnummer));
+    }
+    return rows.map(row => {
+      const vin = importKey(row.vin_full), number = importKey(row.fahrnummer);
+      let reason = "";
+      if (!vin || !/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) reason = "VIN fehlt / ungültig (17 Zeichen)";
+      else if (!number) reason = "Fahrzeugnummer fehlt";
+      else if (vins.has(vin)) reason = "VIN bereits vorhanden / doppelt";
+      else if (numbers.has(number)) reason = "Fahrzeugnummer bereits vorhanden / doppelt";
+      else if (!row.model) reason = "Modell fehlt";
+      if (!reason) { vins.add(vin); numbers.add(number); }
+      return {...row, reason};
+    });
+  }
+  function renderImportPreview() {
+    const ok = importPreview.filter(r => !r.reason).length;
+    const skipped = importPreview.length - ok;
+    $("excelImportSummary").textContent = `${importPreview.length} Zeilen · ${ok} neue Fahrzeuge · ${skipped} übersprungen / zu prüfen`;
+    const host = $("excelImportRows"); host.replaceChildren();
+    for (const [i,r] of importPreview.entries()) {
+      const div = document.createElement("div");
+      div.style.cssText = "padding:7px;border-bottom:1px solid #ddd";
+      div.textContent = `${i+1}. ${r.fahrnummer} · ${r.vin_full} · ${r.model} · ${r.reason || "✓ Neu"}`;
+      if (r.reason) div.style.color = "#b45309";
+      host.appendChild(div);
+    }
+    $("excelImportConfirm").disabled = !ok;
+  }
+  $("excelImportButton").addEventListener("click", () => {
+    if (!isAdmin()) return;
+    closePanels(); importPreview = [];
+    fillBranchSelect($("excelImportBranch"), activeBranchId);
+    $("excelImportFile").value = "";
+    $("excelImportRows").replaceChildren();
+    $("excelImportSummary").textContent = "";
+    $("excelImportConfirm").disabled = true;
+    $("excelImportPanel").style.display = "block";
+  });
+  $("closeExcelImport").addEventListener("click", () => $("excelImportPanel").style.display = "none");
+  $("excelImportFile").addEventListener("change", () => { importPreview=[]; $("excelImportConfirm").disabled=true; $("excelImportSummary").textContent="Bitte Vorschau erneut prüfen."; });
+  $("excelImportBranch").addEventListener("change", () => { $("excelImportConfirm").disabled=true; $("excelImportSummary").textContent="Bitte Vorschau erneut prüfen."; });
+  $("excelImportPreview").addEventListener("click", async () => {
+    if (!isAdmin()) return;
+    const file = $("excelImportFile").files?.[0];
+    if (!file) return alert("Bitte Excel-Datei auswählen.");
+    const button = $("excelImportPreview"); button.disabled = true;
+    $("excelImportConfirm").disabled = true;
+    $("excelImportSummary").textContent = "Excel wird geprüft...";
+    try {
+      await loadExcelLibrary();
+      const wb = XLSX.read(await file.arrayBuffer(), {type:"array", cellDates:false});
+      let parsed = null;
+      for (const sheetName of wb.SheetNames) {
+        const grid = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {header:1, defval:"", raw:false});
+        const idx = grid.findIndex(row => row.some(c => ["fahrgestellnummerfin","vin","vinfull","vollständigevin"].includes(importHeader(c))) && row.some(c => ["kennnummer","fahrzeugnummer","fahrnummer"].includes(importHeader(c))));
+        if (idx < 0) continue;
+        const headers = grid[idx].map(importHeader);
+        const find = (...names) => headers.findIndex(h => names.includes(h));
+        const vinIdx = find("fahrgestellnummerfin","vin","vinfull","vollständigevin");
+        const numIdx = find("kennnummer","fahrzeugnummer","fahrnummer");
+        const modelIdx = find("automarkemodell","modell","model","fahrzeugmodell");
+        const artIdx = find("fahrzeugart");
+        const raw = grid.slice(idx+1).filter(r => r.some(c => importValue(c))).map(r => {
+          const vin = importKey(r[vinIdx]);
+          const art = artIdx < 0 ? "" : importValue(r[artIdx]);
+          return {vin_full:vin, vin5:vin.slice(-5), fahrnummer:importValue(r[numIdx]), model:excelModel(modelIdx < 0 ? "" : r[modelIdx]), fahrzeugart:["Neuwagen","Tageszulassung","Gebrauchtwagen"].includes(art) ? art : null};
+        });
+        parsed = raw; break;
+      }
+      if (!parsed) throw new Error("Spalten nicht gefunden. Benötigt: Kennnummer, Fahrgestellnummer (FIN), Automarke / Modell.");
+      if (parsed.length > 2000) throw new Error("Maximal 2000 Fahrzeuge pro Datei.");
+      const existing = await fetchAllRows("cars","id.asc");
+      importPreview = excelImportClassify(parsed, existing);
+      renderImportPreview();
+    } catch (error) { console.error(error); $("excelImportSummary").textContent = "Fehler: " + error.message; }
+    finally { button.disabled = false; }
+  });
+  $("excelImportConfirm").addEventListener("click", async () => {
+    if (!isAdmin() || savingInProgress) return;
+    const branch = Number($("excelImportBranch").value);
+    if (!branches.some(b => Number(b.id) === branch)) return alert("Ungültiger Standort.");
+    const candidates = importPreview.filter(r => !r.reason);
+    if (!candidates.length) return;
+    if (!confirm(`${candidates.length} Fahrzeuge ohne Parkplatz nach ${branchName(branch)} importieren?`)) return;
+    savingInProgress = true;
+    const button = $("excelImportConfirm"); button.disabled = true;
+    let added = 0, skipped = 0, failed = 0;
+    try {
+      // Vor dem Schreiben erneut alle Filialen und das Archiv prüfen.
+      const existing = await fetchAllRows("cars","id.asc");
+      const rechecked = excelImportClassify(candidates,existing);
+      const seenVins = new Set(existing.map(c => importKey(c.vin_full)).filter(Boolean));
+      const seenNums = new Set(existing.map(c => importKey(c.fahrnummer)).filter(Boolean));
+      for (const row of rechecked) {
+        if (row.reason || seenVins.has(importKey(row.vin_full)) || seenNums.has(importKey(row.fahrnummer))) {skipped++;continue;}
+        try {
+          await apiRequest("cars",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({
+            vin5:row.vin5,vin_full:row.vin_full,fahrnummer:row.fahrnummer,model:row.model,
+            fahrzeugart:row.fahrzeugart,branch_id:branch,position_x:null,position_y:null,
+            yard_status:"on_site",color:"White"
+          })});
+          added++; seenVins.add(importKey(row.vin_full)); seenNums.add(importKey(row.fahrnummer));
+        } catch (error) {failed++;console.error("Import Fahrzeug:",row.fahrnummer,error);}
+        $("excelImportSummary").textContent = `Import läuft: ${added} angelegt, ${skipped} übersprungen, ${failed} Fehler`;
+      }
+      importPreview = [];
+      await loadCars(true);
+      $("excelImportSummary").textContent = `Import abgeschlossen: ${added} angelegt · ${skipped} Duplikate/übersprungen · ${failed} Fehler. Bereits vorhandene Fahrzeuge wurden nicht geändert.`;
+      if (failed) alert("Einige Fahrzeuge konnten nicht gespeichert werden. Details in Browser-Konsole.");
+    } catch(error) {console.error(error);alert("Import abgebrochen: " + error.message);}
+    finally {savingInProgress=false;button.disabled=true;}
+  });
+
   const excelDate = germanDate;
   const excelEvent = value => ({check:"Prüfung",charge:"Ladung",check_and_charge:"Prüfung und Ladung"}[value] || value || "");
   const excelYard = value => ({on_site:"Auf dem Platz",sold:"Verkauft",departed:"Abgefahren"}[value || "on_site"] || value);
